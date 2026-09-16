@@ -44,10 +44,22 @@ cd projeto_LIBRAS
 python -m venv .venv
 ```
 
-No Windows:
+No Windows, no Prompt de Comando (cmd):
 
-```bash
-.venv\Scripts\activate
+```bat
+.venv\Scripts\activate.bat
+```
+
+Se você preferir usar o PowerShell, execute antes:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+```
+
+Depois, ative com:
+
+```powershell
+.venv\Scripts\Activate.ps1
 ```
 
 ### 3. Instale as dependências
