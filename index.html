@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#185c4d">
+  <title>Primeiros Sinais · LIBRAS</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Pular para o conteúdo</a>
+  <header class="site-header">
+    <a class="brand" href="./index.html" aria-label="Primeiros Sinais, início"><span class="brand-mark" aria-hidden="true">ps.</span><span>primeiros sinais<small>UM COMEÇO EM LIBRAS</small></span></a>
+    <span class="pilot-label">Piloto · para iniciantes</span>
+    <button id="switch-profile" class="quiet" hidden>Trocar perfil</button>
+  </header>
+  <main id="main">
+    <p id="error" role="alert" class="error" hidden></p>
+    <section id="profile-screen" aria-labelledby="welcome-title">
+      <div class="welcome-grid">
+        <div class="welcome-copy"><p class="eyebrow">APRENDER É SE APROXIMAR</p><h1 id="welcome-title" tabindex="-1">Grandes conversas.<br><em>Pequenos começos.</em></h1><p class="lead">Dê seus primeiros passos em LIBRAS, um sinal de cada vez. Pratique no seu ritmo e acompanhe sua evolução.</p><div class="principles"><span>01 · Explore</span><span>02 · Pratique</span><span>03 · Repita</span></div><p class="privacy">Sua câmera é processada neste navegador.<br>Seu perfil e seus tempos ficam neste dispositivo.</p></div>
+        <div class="profile-panel"><span class="section-number">VAMOS COMEÇAR</span><h2>Como podemos chamar você?</h2><p>Crie um perfil ou escolha o seu para continuar.</p><form id="profile-form"><label for="profile-name">Seu nome</label><input id="profile-name" name="name" maxlength="32" placeholder="Digite seu nome" autocomplete="nickname" required><button class="primary" type="submit">Começar minha jornada <span aria-hidden="true">→</span></button></form><div id="existing-profiles" hidden><h3>Continuar como</h3><div id="profile-list" class="profile-list"></div></div><p class="small">Sem senha, sem cadastro online. Perfis são compartilhados com quem usa este navegador.</p></div>
+      </div>
+      <aside class="pilot-note"><strong>Sobre este piloto</strong><p>O reconhecimento usa exemplos de 23 letras do dataset local; J, Z e X usam trajetórias. Você pode salvar exemplos da sua própria mão. A base é pequena e experimental; este piloto não avalia sua fluência em LIBRAS.</p></aside>
+    </section>
+    <section id="dashboard-screen" aria-labelledby="dashboard-title" hidden>
+      <div class="dashboard-heading"><div><p class="eyebrow">SEU ESPAÇO DE PRÁTICA</p><h1 id="dashboard-title" tabindex="-1">Olá, <span id="profile-greeting"></span>.</h1><p class="lead">Qual será o próximo pequeno passo?</p></div><div class="visit-card"><strong id="visit-count">1</strong><span>acessos ao seu perfil</span></div></div>
+      <div class="settings-bar"><div><strong>Reconhecimento local</strong><p id="mode-explanation">Use a câmera para reconhecer sinais. A simulação é opcional, apenas para testes.</p></div><label class="toggle"><input type="checkbox" id="simulation"> Simular acertos (debug)</label></div>
+      <div id="game-grid" class="game-grid"></div>
+      <p class="small">Nos desafios aleatórios, a dificuldade varia com a sequência sorteada. Os tempos são referências pessoais.</p>
+    </section>
+    <section id="game-screen" aria-labelledby="game-title" hidden>
+      <div class="game-toolbar"><button id="back-menu" class="quiet">← Voltar aos jogos</button><span id="game-kind" class="pill"></span><div class="timer-box"><span>SEU TEMPO</span><output id="timer" aria-label="Tempo decorrido">00:00:000</output></div></div>
+      <div class="target-area" id="target-area"><p id="game-title" class="eyebrow" tabindex="-1"></p><div id="target" class="target" aria-label="Sinal solicitado"></div><p id="step-label"></p><progress id="sequence-progress" max="1" value="0" aria-label="Progresso da partida"></progress></div>
+      <div class="practice-grid"><div class="camera-column"><div class="camera-stage"><video id="camera" autoplay muted playsinline aria-label="Sua câmera espelhada"></video><canvas id="overlay" aria-hidden="true"></canvas><div id="camera-placeholder"><span aria-hidden="true">◎</span><p>Seu espaço para praticar</p><small>Ative a câmera quando estiver pronto.</small></div><span class="camera-tag">PROCESSAMENTO LOCAL</span></div><div class="camera-controls"><button id="enable-camera" class="secondary">Ativar câmera</button><p id="camera-status" role="status">A câmera está desligada.</p></div>
+        <div id="recognition-panel" class="recognition-panel"><strong id="detected-sign">Aguardando câmera</strong><p id="recognition-hint">A letra detectada aparecerá aqui.</p></div>
+        <details id="calibration-panel" class="calibration-panel"><summary>Ver referência e ajustar à minha mão</summary><p class="small">Antes da partida, reproduza a referência e salve exemplos pessoais se o reconhecimento estiver incerto. Use uma pose correta: a captura aprende o que você mostrar, sem validar o ensino.</p><label for="calibration-class">Sinal para visualizar ou ensinar</label><select id="calibration-class"></select><div id="reference-media" class="reference-media"></div><p id="reference-caption" class="small"></p><p id="personal-count" class="small"></p><button id="save-example" class="secondary">Salvar exemplos deste sinal</button><button id="cancel-calibration" class="quiet" hidden>Cancelar captura</button><p id="calibration-status" role="status"></p><p class="small">Somente coordenadas ficam no perfil local. Nenhuma foto é salva ou enviada.</p></details>
+      </div>
+      <aside class="practice-panel"><p class="eyebrow">UM SINAL DE CADA VEZ</p><h2 id="practice-title">Prepare suas mãos.</h2><p id="practice-instruction">Mantenha o acerto por 1 segundo sem interrupções.</p><div class="confirmation"><div><strong>Confirmação contínua</strong><span id="hold-time">0 / 1000 ms</span></div><progress id="hold-progress" max="1000" value="0" aria-label="Confirmação contínua por um segundo"></progress><p id="confidence">Aguardando início</p></div><button id="start-game" class="primary">Iniciar partida</button><div id="debug-controls" hidden><p class="small">Demonstração: segure o botão ou a tecla <kbd>Espaço</kbd>. Soltar interrompe a confirmação. Com foco no botão, <kbd>Enter</kbd> liga ou desliga a simulação contínua.</p><button id="simulate-hold" class="secondary" disabled>Segure para simular acerto</button><button id="simulate-drop" class="quiet" disabled>Injetar queda para 84%</button></div><p id="game-feedback" role="status" class="feedback">Pratique sem pressa. O tempo começa quando você iniciar.</p></aside></div>
+    </section>
+    <section id="result-screen" aria-labelledby="result-title" class="result-screen" hidden><span class="result-symbol" aria-hidden="true">✓</span><p class="eyebrow">MAIS UM PASSO NA JORNADA</p><h1 id="result-title" tabindex="-1">Sequência concluída!</h1><p id="result-mode"></p><output id="final-time" class="final-time"></output><p id="record-flag" class="record-flag"></p><p id="best-time"></p><p id="result-note" class="small"></p><div class="result-actions"><button id="play-again" class="primary">Praticar novamente</button><button id="result-menu" class="secondary">Escolher outro jogo</button></div></section>
+    <noscript><p class="error">Ative o JavaScript para usar este piloto.</p></noscript>
+    <p id="boot-status" class="small">Carregando aplicativo… Se esta mensagem persistir, abra o index.html com o Live Server.</p>
+  </main>
+  <footer><span>primeiros sinais</span><span>Aprender. Praticar. Conectar.</span><span>LIBRAS · Piloto 01</span></footer>
+  <script src="js/boot.js"></script>
+</body>
+</html>

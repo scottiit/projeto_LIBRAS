@@ -1,0 +1,6 @@
+{
+  "name": "libras-primeiros-sinais",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test", "start": "node scripts/serve.js", "build": "node scripts/build.js", "dataset": "node scripts/export-dataset.js" }
+}
