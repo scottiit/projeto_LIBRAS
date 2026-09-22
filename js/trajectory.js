@@ -138,6 +138,8 @@ export function detectXMovement(frames) {
  * Losing tracking, pose, identity, or terminal location revokes evidence.
  * The game engine still requires 1000 ms of consecutive >85% observations.
  */
+// Legacy baseline kept for regression/comparison only. VisionController now
+// uses TemporalRecognizer (dynamic.js); these fixed heuristics are not live.
 export class DynamicRecognizer {
   constructor() { this.buffer = new TrajectoryBuffer(); this.reset(); }
   reset() { this.buffer.clear(); this.evidence = null; this.target = null; }

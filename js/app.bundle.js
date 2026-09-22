@@ -38,81 +38,6 @@ function formatTime(milliseconds) {
   return `${String(Math.floor(total / 60000)).padStart(2, '0')}:${String(Math.floor(total / 1000) % 60).padStart(2, '0')}:${String(total % 1000).padStart(3, '0')}`;
 }
 
-const PREFIX = 'libras:v1:profile:';
-const validTime = value => Number.isFinite(value) && value > 0;
-const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-class ProfileStore {
-  constructor(storage) { this.storage = storage; }
-  normalize(name) {
-    const normalized = String(name).normalize('NFC').trim().replace(/\s+/g, ' ');
-    if (!normalized || normalized.length > 32 || /[\p{Cc}\p{Cf}]/u.test(normalized)) throw new Error('Use um nome de 1 a 32 caracteres, sem caracteres de controle.');
-    return normalized;
-  }
-  key(name) { return PREFIX + encodeURIComponent(this.normalize(name).toLocaleLowerCase('pt-BR')); }
-  read(name) {
-    const raw = this.storage.getItem(this.key(name));
-    if (raw === null) return null;
-    let profile;
-    try { profile = JSON.parse(raw); } catch { throw new Error('Este perfil tem dados corrompidos. Use outro nome para preservar o original.'); }
-    if (!profile || profile.version !== 1 || typeof profile.name !== 'string' || this.key(profile.name) !== this.key(name) || !Array.isArray(profile.accessHistory) || !profile.accessHistory.every(Number.isFinite) || !isRecord(profile.bestTimes) || !isRecord(profile.demoBestTimes) || !isRecord(profile.settings)) throw new Error('O formato deste perfil não é compatível. Use outro nome.');
-    return profile;
-  }
-  list() {
-    const names = [];
-    for (let index = 0; index < this.storage.length; index++) {
-      const key = this.storage.key(index);
-      if (!key?.startsWith(PREFIX)) continue;
-      try {
-        const profile = JSON.parse(this.storage.getItem(key));
-        if (typeof profile?.name === 'string') names.push(profile.name);
-      } catch { /* Keep damaged entries untouched; other profiles remain accessible. */ }
-    }
-    return names.sort((a, b) => a.localeCompare(b, 'pt-BR'));
-  }
-  write(profile) { this.storage.setItem(this.key(profile.name), JSON.stringify(profile)); }
-  login(name) {
-    const profile = this.read(name) ?? { version: 1, name: this.normalize(name), createdAt: Date.now(), accessHistory: [], bestTimes: {}, demoBestTimes: {}, settings: { simulation: false } };
-    // One-time migration: old profiles defaulted to mock mode. Keep their scores.
-    if (profile.settings.recognizerVersion !== 1) {
-      profile.settings.simulation = false;
-      profile.settings.recognizerVersion = 1;
-    }
-    profile.accessHistory.push(Date.now());
-    this.write(profile);
-    return profile;
-  }
-  saveSettings(name, settings) {
-    const profile = this.read(name);
-    if (!profile) throw new Error('Perfil não encontrado.');
-    profile.settings = { ...profile.settings, simulation: Boolean(settings.simulation) };
-    this.write(profile);
-    return profile;
-  }
-  saveExamples(name, label, samples) {
-    if (!/^[A-Z0-9]$/.test(label) || ['J', 'X', 'Z'].includes(label) || !Array.isArray(samples) || !samples.length || samples.length > 12 || samples.some(sample => !Array.isArray(sample) || sample.length !== 63 || !sample.every(value => Number.isFinite(value) && Math.abs(value) <= 20))) throw new Error('Exemplos de sinal inválidos.');
-    const profile = this.read(name);
-    if (!profile) throw new Error('Perfil não encontrado.');
-    if (!isRecord(profile.signExamples)) profile.signExamples = {};
-    const previous = Array.isArray(profile.signExamples[label]) ? profile.signExamples[label] : [];
-    profile.signExamples[label] = [...previous, ...samples].slice(-12);
-    this.write(profile);
-    return profile;
-  }
-  saveScore(name, mode, elapsed, simulated = false) {
-    if (!validTime(elapsed)) throw new Error('Tempo inválido.');
-    const profile = this.read(name);
-    if (!profile) throw new Error('Perfil não encontrado.');
-    const records = simulated ? profile.demoBestTimes : profile.bestTimes;
-    const previous = Object.hasOwn(records, mode) ? records[mode] : undefined;
-    const improved = !validTime(previous) || elapsed < previous;
-    if (improved) {
-      records[mode] = elapsed;
-      this.write(profile);
-    }
-    return { profile, improved, best: improved ? elapsed : previous };
-  }
-}
-
 const CONFIDENCE_THRESHOLD = 0.85;
 const HOLD_DURATION = 1000;
 const MAX_FRAME_GAP = 180;
@@ -313,6 +238,8 @@ function detectXMovement(frames) {
  * Losing tracking, pose, identity, or terminal location revokes evidence.
  * The game engine still requires 1000 ms of consecutive >85% observations.
  */
+// Legacy baseline kept for regression/comparison only. VisionController now
+// uses TemporalRecognizer (dynamic.js); these fixed heuristics are not live.
 class DynamicRecognizer {
   constructor() { this.buffer = new TrajectoryBuffer(); this.reset(); }
   reset() { this.buffer.clear(); this.evidence = null; this.target = null; }
@@ -491,6 +418,305 @@ class CalibrationSession {
   }
 }
 
+
+const MOTION_VERSION = 1;
+const MOTION_LABELS = ['J', 'X', 'Z', 'UNKNOWN'];
+const MOTION_LIMIT = 8;
+const MOTION_SAMPLES = 32;
+const MOTION_GAP = 180;
+const motionClamp = value => Math.max(0, Math.min(1, value));
+
+/** Coordinates in image-height units. Mirror X as on screen, then canonicalize
+ * left hands to right hands. MediaPipe z is wrist-relative, NOT camera distance:
+ * retain it for finger shape but never infer hand approach from wrist z.
+ */
+function motionFrame(hand, time, handedness, aspectRatio) {
+  if (!isValidHand(hand) || !Number.isFinite(time) || !['Left', 'Right'].includes(handedness) || !Number.isFinite(aspectRatio) || aspectRatio <= 0) return null;
+  const pose = normalizeHand(hand, aspectRatio);
+  if (!pose) return null;
+  const direction = handedness === 'Left' ? 1 : -1;
+  for (let i = 0; i < 63; i += 3) pose[i] *= direction;
+  const palm = [5, 9, 13, 17].reduce((sum, index) => sum + Math.hypot((hand[index].x - hand[0].x) * aspectRatio, hand[index].y - hand[0].y, (hand[index].z - hand[0].z) * aspectRatio), 0) / 4;
+  return { time, handedness, aspectRatio, pose, palm, wrist: [direction * hand[0].x * aspectRatio, hand[0].y] };
+}
+function motionDifference(a, b) {
+  const palm = (a.palm + b.palm) / 2;
+  return Math.hypot(featureDistance(a.pose, b.pose), .55 * Math.hypot(a.wrist[0] - b.wrist[0], a.wrist[1] - b.wrist[1]) / palm);
+}
+function temporalCost(a, b) {
+  return Math.hypot(featureDistance(a, b), .55 * Math.hypot(a[63] - b[63], a[64] - b[64]));
+}
+
+/** Strict, bounded schema also used for localStorage and untrusted JSON imports. */
+function validMotionClip(clip) {
+  return Boolean(clip && clip.version === MOTION_VERSION && Number.isFinite(clip.durationMs) && clip.durationMs >= 250 && clip.durationMs <= 4500 &&
+    Array.isArray(clip.frames) && clip.frames.length === MOTION_SAMPLES && clip.frames.every(frame => Array.isArray(frame) && frame.length === 65 && frame.every(value => Number.isFinite(value) && Math.abs(value) <= 20)) &&
+    clip.frames[0][63] === 0 && clip.frames[0][64] === 0 && motionExtent(clip) >= .16);
+}
+function motionExtent(clip) {
+  return Math.max(...clip.frames.map(frame => temporalCost(frame, clip.frames[0])));
+}
+/** Resample by elapsed time, not frame index. Local pose is wrist-relative;
+ * translation is relative to the FIRST wrist and FIRST palm scale, preserving
+ * the path that per-frame recentering alone would destroy (especially J/Z).
+ * Fixed 32 samples bound storage and DTW work independently of camera FPS.
+ */
+function encodeMotion(frames) {
+  const first = frames[0], last = frames.at(-1);
+  const durationMs = last.time - first.time;
+  const values = frames.map(frame => [...frame.pose, (frame.wrist[0] - first.wrist[0]) / first.palm, (frame.wrist[1] - first.wrist[1]) / first.palm]);
+  let cursor = 0;
+  const sampled = Array.from({ length: MOTION_SAMPLES }, (_, i) => {
+    const time = first.time + durationMs * i / (MOTION_SAMPLES - 1);
+    while (cursor < frames.length - 2 && frames[cursor + 1].time < time) cursor++;
+    const fraction = motionClamp((time - frames[cursor].time) / (frames[cursor + 1].time - frames[cursor].time));
+    return values[cursor].map((value, axis) => value + fraction * (values[cursor + 1][axis] - value));
+  });
+  const clip = { version: MOTION_VERSION, durationMs, frames: sampled };
+  return validMotionClip(clip) ? clip : null;
+}
+
+/** Exact DTW in a Sakoe-Chiba-style band (25% of length).
+ * D(i,j) = c(i,j) + min(D(i-1,j), D(i,j-1), D(i-1,j-1)).
+ * c combines weighted local landmark RMS and anchored wrist displacement.
+ * Return accumulated minimum-path cost / path length. O(N * band) cells,
+ * O(N) memory; this is NOT FastDTW, neural inference or a calibrated probability.
+ * Uniform resampling removes global speed; warping handles local speed changes.
+ */
+function motionDtw(left, right) {
+  if (!validMotionClip(left) || !validMotionClip(right)) return Infinity;
+  const a = left.frames, b = right.frames, band = Math.ceil(Math.max(a.length, b.length) * .25);
+  let previous = new Float64Array(b.length + 1).fill(Infinity), lengths = new Uint16Array(b.length + 1);
+  previous[0] = 0;
+  for (let i = 1; i <= a.length; i++) {
+    const row = new Float64Array(b.length + 1).fill(Infinity), counts = new Uint16Array(b.length + 1);
+    for (let j = Math.max(1, i - band); j <= Math.min(b.length, i + band); j++) {
+      let best = previous[j - 1], count = lengths[j - 1];
+      if (previous[j] < best) { best = previous[j]; count = lengths[j]; }
+      if (row[j - 1] < best) { best = row[j - 1]; count = counts[j - 1]; }
+      row[j] = best + temporalCost(a[i - 1], b[j - 1]); counts[j] = count + 1;
+    }
+    previous = row; lengths = counts;
+  }
+  return previous[b.length] / lengths[b.length];
+}
+
+/** All dynamic classes compete; the requested game target is never an input.
+ * Absolute similarity, endpoint agreement and nearest competing class margin
+ * prevent a nearest template from automatically becoming an accepted sign.
+ * UNKNOWN templates are explicit counterexamples, and can only reject.
+ */
+class MotionClassifier {
+  constructor(examples) { this.setExamples(examples); }
+  setExamples(examples = {}) {
+    this.examples = Object.fromEntries(MOTION_LABELS.map(label => [label, (Array.isArray(examples?.[label]) ? examples[label] : []).filter(validMotionClip).slice(-MOTION_LIMIT)]));
+  }
+  hasClass(label) { return Boolean(this.examples[label]?.length); }
+  predict(clip) {
+    const result = { targetClass: null, confidenceProbability: 0, timestamp: Date.now(), source: 'dtw', alternatives: [], reason: 'invalid' };
+    if (!validMotionClip(clip)) return result;
+    const alternatives = MOTION_LABELS.filter(label => this.hasClass(label)).map(label => {
+      const distances = this.examples[label].map(example => {
+        const dtw = motionDtw(clip, example);
+        // Do not let time warping hide the wrong initial/final pose or an incomplete path.
+        const endpoints = (temporalCost(clip.frames[0], example.frames[0]) + temporalCost(clip.frames.at(-1), example.frames.at(-1))) / 2;
+        return Math.max(dtw, endpoints * .6);
+      });
+      return { label, distance: Math.min(...distances) };
+    }).sort((a, b) => a.distance - b.distance);
+    if (!alternatives.length) return { ...result, reason: 'no-examples' };
+    const [best, second] = alternatives;
+    const similarity = Math.exp(-.5 * (best.distance / .22) ** 2);
+    const separation = second ? motionClamp((second.distance - best.distance) / .12) : 1;
+    const score = Math.min(similarity, .5 + .5 * separation);
+    const accepted = best.label !== 'UNKNOWN' && score > .85;
+    return { ...result, targetClass: accepted ? best.label : null, confidenceProbability: accepted ? score : 0, similarityScore: score, alternatives, reason: accepted ? 'matched' : best.label === 'UNKNOWN' ? 'negative' : 'uncertain' };
+  }
+}
+
+/** Online segmentation: stable start -> motion -> stable end. Both recording
+ * and live recognition use this same state machine. Tracking gaps, hand switches,
+ * aspect changes and jumps invalidate the ENTIRE unfinished movement. No interpolation
+ * bridges missing tracking. History has a 4.5 s time limit AND a 160-frame cap.
+ */
+class MotionSegmenter {
+  constructor() { this.reset(); }
+  reset() { this.state = 'arming'; this.anchor = null; this.last = null; this.frames = []; this.preRoll = []; this.stillSince = null; }
+  observe(hand, time, handedness, aspectRatio = 1) {
+    const frame = motionFrame(hand, time, handedness, aspectRatio);
+    if (!frame) { this.reset(); return { state: 'tracking-lost' }; }
+    const broken = this.last && (time <= this.last.time || time - this.last.time > MOTION_GAP || handedness !== this.last.handedness || aspectRatio !== this.last.aspectRatio || motionDifference(this.last, frame) > 2);
+    if (broken) { this.reset(); return { state: 'tracking-lost' }; }
+    this.last = frame;
+    if (!this.anchor) this.anchor = frame;
+    if (this.state === 'arming') {
+      if (motionDifference(this.anchor, frame) > .07) this.anchor = frame;
+      this.preRoll = [frame];
+      if (time - this.anchor.time >= 240) this.state = 'ready';
+      return { state: this.state };
+    }
+    if (this.state === 'ready') {
+      this.preRoll.push(frame);
+      this.preRoll = this.preRoll.filter(item => time - item.time <= 160).slice(-12);
+      if (motionDifference(this.anchor, frame) <= .12) return { state: 'ready' };
+      this.frames = [...this.preRoll]; this.state = 'recording'; this.anchor = frame; this.stillSince = time;
+    } else if (time - this.frames.at(-1).time >= 30) this.frames.push(frame);
+    if (time - this.frames[0].time > 4500 || this.frames.length >= 160) { this.reset(); return { state: 'too-long' }; }
+    if (motionDifference(this.anchor, frame) > .07) { this.anchor = frame; this.stillSince = time; }
+    if (time - this.stillSince < 300) return { state: 'recording', durationMs: time - this.frames[0].time };
+    // Keep only 100 ms of the final pause: its length is not part of the sign.
+    const trimmed = this.frames.filter(item => item.time <= this.stillSince + 100);
+    const clip = trimmed.length >= 4 ? encodeMotion(trimmed) : null;
+    this.reset();
+    return clip ? { state: 'complete', clip, terminal: frame } : { state: 'too-short' };
+  }
+}
+
+class MotionCapture {
+  constructor(label, now) {
+    if (!MOTION_LABELS.includes(label)) throw new Error('Classe dinâmica inválida.');
+    this.label = label; this.startedAt = now; this.segmenter = new MotionSegmenter();
+  }
+  observe(hand, time, aspectRatio = 1, handedness) {
+    if (time - this.startedAt > 15000) return { state: 'timeout', dynamic: true };
+    if (time - this.startedAt < 2000) return { state: 'warmup', remaining: Math.ceil((2000 - time + this.startedAt) / 1000), dynamic: true };
+    const status = this.segmenter.observe(hand, time, handedness, aspectRatio);
+    return { ...status, dynamic: true, label: this.label };
+  }
+}
+
+/** A completed match is evidence of a movement, not a permanent class latch.
+ * Fresh, uninterrupted frames in its terminal pose can sustain that evidence for
+ * 1 s in GameEngine. A lost frame, hand switch, changed pose or target reset clears
+ * it. No new motion is inferred from the held pose; repeated letters need repetition.
+ */
+class TemporalRecognizer {
+  constructor(examples) { this.classifier = new MotionClassifier(examples); this.reset(); }
+  setExamples(examples) { this.classifier.setExamples(examples); this.reset(); }
+  reset() { this.segmenter = new MotionSegmenter(); this.evidence = null; this.lastTime = null; this.feedback = null; }
+  predict(hand, time, handedness, aspectRatio = 1) {
+    const empty = state => ({ targetClass: null, confidenceProbability: 0, timestamp: Date.now(), source: 'dtw', state });
+    const frame = motionFrame(hand, time, handedness, aspectRatio);
+    if (!frame || (this.lastTime !== null && (time <= this.lastTime || time - this.lastTime > MOTION_GAP))) { this.reset(); return empty('tracking-lost'); }
+    this.lastTime = time;
+    if (this.evidence) {
+      const { terminal, prediction } = this.evidence;
+      if (handedness === terminal.handedness && aspectRatio === terminal.aspectRatio && time - terminal.time <= 1800 && motionDifference(terminal, frame) <= .1) return { ...prediction, timestamp: Date.now(), state: 'confirming' };
+      this.reset(); return empty('restart');
+    }
+    const status = this.segmenter.observe(hand, time, handedness, aspectRatio);
+    if (status.state !== 'complete') {
+      if (this.feedback && time < this.feedback.until && ['arming', 'ready'].includes(status.state)) return { ...this.feedback.prediction, timestamp: Date.now(), state: 'rejected' };
+      this.feedback = null;
+      return empty(status.state);
+    }
+    const prediction = this.classifier.predict(status.clip);
+    if (prediction.targetClass && DYNAMIC_CLASSES.has(prediction.targetClass)) this.evidence = { terminal: status.terminal, prediction };
+    else this.feedback = { prediction, until: time + 1200 };
+    return { ...prediction, state: this.evidence ? 'confirming' : 'rejected' };
+  }
+}
+
+const PREFIX = 'libras:v1:profile:';
+const validTime = value => Number.isFinite(value) && value > 0;
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+class ProfileStore {
+  constructor(storage) { this.storage = storage; }
+  normalize(name) {
+    const normalized = String(name).normalize('NFC').trim().replace(/\s+/g, ' ');
+    if (!normalized || normalized.length > 32 || /[\p{Cc}\p{Cf}]/u.test(normalized)) throw new Error('Use um nome de 1 a 32 caracteres, sem caracteres de controle.');
+    return normalized;
+  }
+  key(name) { return PREFIX + encodeURIComponent(this.normalize(name).toLocaleLowerCase('pt-BR')); }
+  read(name) {
+    const raw = this.storage.getItem(this.key(name));
+    if (raw === null) return null;
+    let profile;
+    try { profile = JSON.parse(raw); } catch { throw new Error('Este perfil tem dados corrompidos. Use outro nome para preservar o original.'); }
+    if (!profile || profile.version !== 1 || typeof profile.name !== 'string' || this.key(profile.name) !== this.key(name) || !Array.isArray(profile.accessHistory) || !profile.accessHistory.every(Number.isFinite) || !isRecord(profile.bestTimes) || !isRecord(profile.demoBestTimes) || !isRecord(profile.settings)) throw new Error('O formato deste perfil não é compatível. Use outro nome.');
+    return profile;
+  }
+  list() {
+    const names = [];
+    for (let index = 0; index < this.storage.length; index++) {
+      const key = this.storage.key(index);
+      if (!key?.startsWith(PREFIX)) continue;
+      try {
+        const profile = JSON.parse(this.storage.getItem(key));
+        if (typeof profile?.name === 'string') names.push(profile.name);
+      } catch { /* Keep damaged entries untouched; other profiles remain accessible. */ }
+    }
+    return names.sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }
+  write(profile) { this.storage.setItem(this.key(profile.name), JSON.stringify(profile)); }
+  login(name) {
+    const profile = this.read(name) ?? { version: 1, name: this.normalize(name), createdAt: Date.now(), accessHistory: [], bestTimes: {}, demoBestTimes: {}, settings: { simulation: false } };
+    // One-time migration: old profiles defaulted to mock mode. Keep their scores.
+    if (profile.settings.recognizerVersion !== 1) {
+      profile.settings.simulation = false;
+      profile.settings.recognizerVersion = 1;
+    }
+    profile.accessHistory.push(Date.now());
+    this.write(profile);
+    return profile;
+  }
+  saveSettings(name, settings) {
+    const profile = this.read(name);
+    if (!profile) throw new Error('Perfil não encontrado.');
+    profile.settings = { ...profile.settings, simulation: Boolean(settings.simulation) };
+    this.write(profile);
+    return profile;
+  }
+  saveExamples(name, label, samples) {
+    if (!/^[A-Z0-9]$/.test(label) || ['J', 'X', 'Z'].includes(label) || !Array.isArray(samples) || !samples.length || samples.length > 12 || samples.some(sample => !Array.isArray(sample) || sample.length !== 63 || !sample.every(value => Number.isFinite(value) && Math.abs(value) <= 20))) throw new Error('Exemplos de sinal inválidos.');
+    const profile = this.read(name);
+    if (!profile) throw new Error('Perfil não encontrado.');
+    if (!isRecord(profile.signExamples)) profile.signExamples = {};
+    const previous = Array.isArray(profile.signExamples[label]) ? profile.signExamples[label] : [];
+    profile.signExamples[label] = [...previous, ...samples].slice(-12);
+    this.write(profile);
+    return profile;
+  }
+  saveScore(name, mode, elapsed, simulated = false) {
+    if (!validTime(elapsed)) throw new Error('Tempo inválido.');
+    const profile = this.read(name);
+    if (!profile) throw new Error('Perfil não encontrado.');
+    const records = simulated ? profile.demoBestTimes : profile.bestTimes;
+    const previous = Object.hasOwn(records, mode) ? records[mode] : undefined;
+    const improved = !validTime(previous) || elapsed < previous;
+    if (improved) {
+      records[mode] = elapsed;
+      this.write(profile);
+    }
+    return { profile, improved, best: improved ? elapsed : previous };
+  }
+  saveMotion(name, label, clip) {
+    return this.importMotion(name, { version: MOTION_VERSION, examples: { [label]: [clip] } });
+  }
+  importMotion(name, payload) {
+    if (payload?.version !== MOTION_VERSION || !isRecord(payload.examples) || !Object.keys(payload.examples).length || Object.keys(payload.examples).some(label => !MOTION_LABELS.includes(label)) ||
+      Object.values(payload.examples).some(clips => !Array.isArray(clips) || clips.length > MOTION_LIMIT || !clips.every(validMotionClip))) throw new Error('Arquivo de movimentos inválido ou de versão incompatível.');
+    const profile = this.read(name);
+    if (!profile) throw new Error('Perfil não encontrado.');
+    const examples = {};
+    for (const label of MOTION_LABELS) {
+      const previous = Array.isArray(profile.motionExamples?.[label]) ? profile.motionExamples[label].filter(validMotionClip) : [];
+      examples[label] = [...previous, ...(payload.examples[label] ?? [])].slice(-MOTION_LIMIT).map(clip => ({ version: MOTION_VERSION, durationMs: clip.durationMs, frames: clip.frames.map(frame => [...frame]) }));
+    }
+    profile.motionExamples = examples;
+    this.write(profile); // One write: quota failure cannot leave a partial import.
+    return profile;
+  }
+  removeLastMotion(name, label) {
+    if (!MOTION_LABELS.includes(label)) throw new Error('Classe dinâmica inválida.');
+    const profile = this.read(name);
+    if (!profile) throw new Error('Perfil não encontrado.');
+    if (Array.isArray(profile.motionExamples?.[label])) profile.motionExamples[label].pop();
+    this.write(profile);
+    return profile;
+  }
+}
+
 const CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240';
 
 /** Replace this adapter with a TensorFlow.js classifier returning the same contract.
@@ -522,16 +748,17 @@ class VisionController {
     Object.assign(this, { video, canvas, onFrame, onStatus });
     this.onCalibration = onCalibration;
     this.classifier = new SignClassifier();
-    this.dynamic = new DynamicRecognizer();
+    this.dynamic = new TemporalRecognizer();
     this.generation = 0;
     this.revision = 0;
     this.target = null;
   }
   setPersonalExamples(examples) { this.classifier.setPersonalExamples(examples); }
+  setMotionExamples(examples) { this.dynamic.setExamples(examples); }
   startCalibration(label) {
     if (!this.ready) throw new Error('Ative a câmera e aguarde a preparação dos exemplos antes de ensinar um sinal.');
     this.reset();
-    this.calibration = new CalibrationSession(label, performance.now());
+    this.calibration = MOTION_LABELS.includes(label) ? new MotionCapture(label, performance.now()) : new CalibrationSession(label, performance.now());
   }
   cancelCalibration() { this.calibration = null; }
   setTarget(target) { this.target = target; this.reset(); }
@@ -585,20 +812,19 @@ class VisionController {
     this.draw(hand);
     if (target !== this.target || revision !== this.revision) return;
     const aspectRatio = this.video.videoHeight ? this.video.videoWidth / this.video.videoHeight : 1;
+    // Hands labels assume mirrored input, but send() receives raw video.
+    const rawLabel = results.multiHandedness?.[0]?.label;
+    const handedness = rawLabel === 'Left' ? 'Right' : rawLabel === 'Right' ? 'Left' : null;
     if (this.calibration) {
-      const status = this.calibration.observe(hand, time, aspectRatio);
+      const status = this.calibration.observe(hand, time, aspectRatio, handedness);
       if (['complete', 'timeout'].includes(status.state)) this.calibration = null;
       this.onCalibration(status);
       return;
     }
     let prediction = null;
     if (isValidHand(hand)) {
-      // Hands labels assume mirrored input, but send() receives raw video.
-      // Swap labels here; coordinates are mirrored once in TrajectoryBuffer.
-      const rawLabel = results.multiHandedness?.[0]?.label;
-      const handedness = rawLabel === 'Left' ? 'Right' : 'Left';
       prediction = DYNAMIC_CLASSES.has(target)
-        ? { targetClass: target, confidenceProbability: rawLabel ? this.dynamic.predict(hand, target, time, handedness) : 0, timestamp: Date.now(), source: 'heuristic' }
+        ? this.dynamic.predict(hand, time, handedness, aspectRatio)
         : this.classifier.predict(hand, /^\d$/.test(target) ? 'numbers' : 'alphabet', aspectRatio);
     } else this.dynamic.reset();
     if (generation === this.generation && target === this.target && revision === this.revision) this.onFrame(prediction, time, isValidHand(hand));
@@ -634,6 +860,7 @@ class VisionController {
 const $ = id => document.getElementById(id);
 let store, profile, selectedMode, sequence, simulated = false, holding = false, screen = 'profile';
 let debugPending = false, dropUntil = 0, session = 0, lastMockAt = 0;
+let lastMotionAlternatives = null;
 function report(error) { $('error').textContent = error.message || String(error); $('error').hidden = false; }
 function clearError() { $('error').hidden = true; }
 function showScreen(name, focus) {
@@ -643,35 +870,79 @@ function showScreen(name, focus) {
   $(focus)?.focus();
 }
 const vision = new VisionController($('camera'), $('overlay'), (prediction, capturedAt, tracked) => {
-  if (simulated) return;
+  // In debug mode the camera remains authoritative until the developer holds
+  // the manual injector. During that hold, ignore camera frames so they cannot
+  // break the synthetic one-second confirmation being tested.
+  if (simulated && holding) return;
   const approved = engine.state === 'running' && engine.observe(prediction, capturedAt);
   if (approved) return;
   const label = prediction?.targetClass;
+  const expected = engine.state === 'running' ? engine.current?.target : vision.target;
   const probability = prediction?.confidenceProbability ?? 0;
   const score = (probability * 100).toFixed(1);
   $('detected-sign').textContent = !tracked ? 'Nenhuma mão detectada' : label ? `Detectado: ${label}` : 'Nenhum sinal identificado';
-  $('detected-sign').dataset.match = label === engine.current?.target && probability > .85 ? 'true' : 'false';
-  $('confidence').textContent = !tracked ? 'Mão não detectada · confirmação reiniciada' : prediction?.source === 'heuristic' ? `Evidência de movimento: ${score}%` : `Semelhança com os exemplos: ${score}%`;
-  if (label && label !== engine.current?.target) $('recognition-hint').textContent = `A mão se parece mais com ${label}. O alvo continua sendo ${engine.current?.target}.`;
+  $('detected-sign').dataset.match = label === expected && probability > .85 ? 'true' : 'false';
+  $('confidence').textContent = !tracked ? 'Mão não detectada · confirmação reiniciada' : prediction?.source === 'dtw' ? motionMessage(prediction) : `Semelhança com os exemplos: ${score}%`;
+  if (prediction?.alternatives && prediction.source === 'dtw') renderMotionDiagnostics(prediction);
+  if (prediction?.source === 'dtw') $('recognition-hint').textContent = label ? `Movimento identificado: ${label}. Mantenha a pose final por 1 segundo.${label !== expected ? ` O alvo é ${expected}.` : ''}` : motionMessage(prediction);
+  else if (label && label !== expected) $('recognition-hint').textContent = `A mão se parece mais com ${label}. O alvo continua sendo ${expected}.`;
   else if (label && probability <= .85) $('recognition-hint').textContent = 'Ainda incerto. Ajuste a posição e a orientação dos dedos; antes da partida, você pode salvar exemplos pessoais.';
   else $('recognition-hint').textContent = engine.state === 'running' ? 'Mantenha a pose por um segundo para confirmar.' : 'O reconhecimento já está ativo. Clique em Iniciar partida quando estiver pronto.';
 }, message => {
   $('camera-status').textContent = message;
   $('camera-placeholder').hidden = Boolean(vision.stream);
   $('enable-camera').textContent = vision.stream ? 'Desligar câmera' : 'Ativar câmera';
+  if (!vision.stream && screen === 'game' && !$('cancel-calibration').hidden) {
+    finishCalibration(); $('calibration-status').textContent = 'Captura interrompida. Ative a câmera novamente.';
+  }
 }, status => {
   if (status.state === 'complete') {
     try {
-      profile = store.saveExamples(profile.name, status.label, status.samples);
-      vision.setPersonalExamples(profile.signExamples);
-      $('calibration-status').textContent = `Cinco exemplos de ${status.label} salvos neste perfil. Faça o sinal novamente para testar.`;
+      if (status.dynamic) {
+        // Diagnose against PREVIOUS examples; matching a sample against itself is not a test.
+        renderMotionDiagnostics(vision.dynamic.classifier.predict(status.clip));
+        profile = store.saveMotion(profile.name, status.label, status.clip);
+        vision.setMotionExamples(profile.motionExamples);
+        $('calibration-status').textContent = `Movimento de ${status.label === 'UNKNOWN' ? 'rejeição' : status.label} salvo (${(status.clip.durationMs / 1000).toFixed(1)} s). Repita para testar; grave de 3 a 5 execuções variadas.`;
+      } else {
+        profile = store.saveExamples(profile.name, status.label, status.samples);
+        vision.setPersonalExamples(profile.signExamples);
+        $('calibration-status').textContent = `Cinco exemplos de ${status.label} salvos neste perfil. Faça o sinal novamente para testar.`;
+      }
     } catch (error) { report(new Error(`Os exemplos não foram salvos: ${error.message}`)); }
     finishCalibration();
   } else if (status.state === 'timeout') {
-    $('calibration-status').textContent = 'Não foi possível obter uma pose estável. Tente novamente com a mão inteira no enquadramento.';
+    $('calibration-status').textContent = 'Captura encerrada. Tente novamente com a mão inteira no enquadramento, pausando antes e depois do movimento.';
     finishCalibration();
-  } else $('calibration-status').textContent = status.state === 'warmup' ? `Prepare o sinal. A captura começa em ${status.remaining}…` : status.state === 'tracking-lost' ? 'Mão não detectada. A captura recomeçará ao enquadrá-la.' : `Mantenha a pose estável… ${Math.round(status.progress * 100)}%`;
+  } else $('calibration-status').textContent = status.state === 'warmup' ? `Prepare o sinal. A captura começa em ${status.remaining}…` : status.dynamic ? motionMessage(status) : status.state === 'tracking-lost' ? 'Mão não detectada. A captura recomeçará ao enquadrá-la.' : `Mantenha a pose estável… ${Math.round(status.progress * 100)}%`;
+  if (status.dynamic) $('confidence').textContent = status.state === 'complete' ? 'Captura concluída. Consulte o resultado no painel de ajuste.' : $('calibration-status').textContent;
 });
+function motionMessage(status) {
+  if (status.state === 'confirming') return `Movimento: ${status.targetClass} · semelhança ${(status.confidenceProbability * 100).toFixed(1)}% · mantenha a pose final`;
+  const messages = {
+    arming: 'Pare brevemente na posição inicial.', ready: 'Pronto: execute o movimento completo.',
+    recording: 'Lendo movimento… Pare na posição final para concluir.',
+    'tracking-lost': 'Rastreamento interrompido. Recomece pela posição inicial.',
+    'too-long': 'Movimento longo demais. Recomece e conclua em até 4,5 segundos.',
+    'too-short': 'Movimento curto demais. Recomece com a trajetória completa.',
+    restart: 'Prepare a posição inicial e repita o movimento.',
+    rejected: status.reason === 'no-examples' ? 'Grave exemplos de J, X e Z no painel de ajuste.' : status.reason === 'negative' ? 'Movimento semelhante a um exemplo de rejeição. Tente novamente.' : 'Movimento incerto. Confira a referência e repita a trajetória completa.',
+  };
+  return messages[status.state] ?? 'Aguardando movimento.';
+}
+function renderMotionDiagnostics(prediction) {
+  if (prediction.alternatives === lastMotionAlternatives) return;
+  lastMotionAlternatives = prediction.alternatives;
+  $('motion-distances').replaceChildren();
+  for (const item of prediction.alternatives ?? []) {
+    const row = document.createElement('tr');
+    for (const text of [item.label === 'UNKNOWN' ? 'Rejeição' : item.label, item.distance.toFixed(3)]) {
+      const cell = document.createElement('td'); cell.textContent = text; row.append(cell);
+    }
+    $('motion-distances').append(row);
+  }
+  $('motion-diagnostic-status').textContent = prediction.reason === 'no-examples' ? 'Ainda não há exemplos para comparação.' : `Última sequência: ${prediction.targetClass ?? 'não reconhecida'} · escore ${((prediction.similarityScore ?? 0) * 100).toFixed(1)}%. Menor distância indica maior semelhança. Capturas são comparadas antes de serem adicionadas à base.`;
+}
 const mock = new StaticClassifierMock();
 const engine = new GameEngine({
   onAdvance() {
@@ -688,7 +959,7 @@ const engine = new GameEngine({
     vision.stop();
     $('final-time').textContent = formatTime(elapsed);
     $('result-mode').textContent = selectedMode.title;
-    $('result-note').textContent = simulated ? 'Partida simulada. Este tempo não mede reconhecimento ou domínio de LIBRAS.' : 'Reconhecimento por exemplos e trajetórias. Este resultado não certifica fluência.';
+    $('result-note').textContent = simulated ? 'Partida em modo debug. A câmera continuou ativa e a injeção manual ficou disponível. Este tempo fica separado dos recordes normais.' : 'Reconhecimento por exemplos e trajetórias. Este resultado não certifica fluência.';
     $('record-flag').textContent = '';
     $('best-time').textContent = '';
     try {
@@ -713,7 +984,7 @@ function listProfiles() {
 }
 function login(name) {
   clearError();
-  try { profile = store.login(name); vision.setPersonalExamples(profile.signExamples); dashboard(); } catch (error) { report(error); }
+  try { profile = store.login(name); vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples); dashboard(); } catch (error) { report(error); }
 }
 function dashboard() {
   session++;
@@ -724,7 +995,7 @@ function dashboard() {
   $('simulation').checked = simulated;
   $('profile-greeting').textContent = profile.name;
   $('visit-count').textContent = profile.accessHistory.length;
-  $('mode-explanation').textContent = simulated ? 'Modo de teste: os acertos são injetados e os tempos ficam separados.' : 'Reconhecimento pela câmera ativo: 23 letras usam os exemplos do projeto; J, Z e X usam trajetórias. Números precisam de exemplos pessoais.';
+  $('mode-explanation').textContent = simulated ? 'Modo debug: o reconhecimento pela câmera continua ativo e você também pode injetar acertos manualmente. Os tempos ficam separados.' : '23 letras têm exemplos no projeto. Para J, X e Z, grave movimentos no seu perfil; para números, salve poses pessoais.';
   $('game-grid').replaceChildren();
   MODES.forEach(mode => {
     const button = document.createElement('button');
@@ -749,7 +1020,7 @@ function prepare(mode) {
   engine.sequence = sequence; engine.index = 0;
   vision.setTarget(engine.current.target);
   $('game-title').textContent = mode.title;
-  $('game-kind').textContent = simulated ? 'Demonstração · acertos simulados' : 'Reconhecimento pela câmera';
+  $('game-kind').textContent = simulated ? 'Debug · câmera + injeção manual' : 'Reconhecimento pela câmera';
   $('timer').textContent = '00:00:000';
   $('hold-time').textContent = '0 / 1000 ms'; $('hold-progress').value = 0;
   $('confidence').textContent = 'Aguardando início';
@@ -759,14 +1030,16 @@ function prepare(mode) {
   $('enable-camera').textContent = 'Ativar câmera';
   $('start-game').hidden = false; $('start-game').disabled = false;
   $('debug-controls').hidden = !simulated;
-  $('recognition-panel').hidden = simulated;
-  $('calibration-panel').hidden = simulated;
+  $('recognition-panel').hidden = false;
+  $('calibration-panel').hidden = false;
   $('detected-sign').textContent = 'Aguardando câmera';
   $('recognition-hint').textContent = 'A letra detectada aparecerá aqui, mesmo antes de iniciar a partida.';
   $('calibration-status').textContent = '';
+  lastMotionAlternatives = null;
+  $('motion-distances').replaceChildren(); $('motion-diagnostic-status').textContent = 'Execute um movimento para comparar com os exemplos salvos.';
   finishCalibration();
   $('simulate-hold').disabled = true; $('simulate-drop').disabled = true;
-  $('game-feedback').textContent = simulated ? 'Você pode testar a mecânica sem câmera. Inicie e segure o botão de simulação.' : 'Ative a câmera e teste a pose antes de iniciar. O relógio só começa com o botão Iniciar partida.';
+  $('game-feedback').textContent = simulated ? 'Ative a câmera para reconhecer sinais reais ou inicie sem ela e use a injeção manual.' : 'Ative a câmera e teste a pose antes de iniciar. O relógio só começa com o botão Iniciar partida.';
   renderTarget();
   showScreen('game', 'game-title');
 }
@@ -784,7 +1057,7 @@ function renderTarget() {
   $('sequence-progress').max = sequence.length; $('sequence-progress').value = engine.index;
   const dynamic = ['J', 'Z', 'X'].includes(step.target);
   $('practice-title').textContent = dynamic ? `Explore o movimento de ${step.target}.` : `Vamos praticar ${step.target}?`;
-  $('practice-instruction').textContent = simulated ? 'Segure o acerto simulado por 1 segundo. Qualquer interrupção reinicia a confirmação.' : dynamic ? 'Execute a trajetória e mantenha a pose final por 1 segundo. A detecção ainda é experimental.' : vision.classifier.hasClass(step.target) ? 'Mostre uma mão inteira e reproduza o sinal. Mantenha a semelhança acima de 85% por um segundo.' : `Não há exemplos de ${step.target} no dataset. Antes de iniciar, salve exemplos pessoais desse número no painel abaixo da câmera.`;
+  $('practice-instruction').textContent = simulated ? 'A câmera reconhece normalmente. Para testar a engine, você também pode manter a injeção manual por 1 segundo.' : dynamic ? 'Execute a trajetória e mantenha a pose final por 1 segundo. A detecção ainda é experimental.' : vision.classifier.hasClass(step.target) ? 'Mostre uma mão inteira e reproduza o sinal. Mantenha a semelhança acima de 85% por um segundo.' : `Não há exemplos de ${step.target} no dataset. Antes de iniciar, salve exemplos pessoais desse número no painel abaixo da câmera.`;
   if (engine.state !== 'running') $('calibration-class').value = step.target;
   renderReference();
 }
@@ -801,21 +1074,36 @@ function renderReference() {
   }
   $('reference-caption').textContent = path ? `Referência de ${label} do acervo original. Confira a execução com um instrutor de LIBRAS.` : 'Não há imagem de referência para este número no acervo. Peça a um instrutor para demonstrá-lo antes de salvar.';
   const dynamic = ['J', 'Z', 'X'].includes(label);
-  $('save-example').disabled = dynamic || engine.state === 'running';
-  $('personal-count').textContent = dynamic ? 'Este sinal é avaliado pelo movimento, não por uma foto da pose.' : `${profile?.signExamples?.[label]?.length ?? 0} exemplos pessoais de ${label} salvos.`;
+  const temporal = dynamic || label === 'UNKNOWN';
+  const busy = engine.state === 'running' || Boolean(vision.calibration);
+  $('save-example').disabled = busy;
+  $('save-example').textContent = temporal ? 'Gravar um movimento' : 'Salvar exemplos deste sinal';
+  $('motion-tools').hidden = !temporal;
+  $('motion-guide').hidden = !temporal;
+  $('personal-count').textContent = temporal ? `${profile?.motionExamples?.[label]?.length ?? 0} de 8 movimentos salvos para ${label === 'UNKNOWN' ? 'rejeição' : label}. Recomendamos de 3 a 5 execuções.` : `${profile?.signExamples?.[label]?.length ?? 0} exemplos pessoais de ${label} salvos.`;
+  if (label === 'UNKNOWN') $('reference-caption').textContent = 'Grave movimentos parecidos, mas incorretos (ex.: trajetória incompleta ou invertida), para ajudar o sistema a rejeitá-los.';
+  $('remove-motion').disabled = busy || !profile?.motionExamples?.[label]?.length;
+  $('import-motion').disabled = busy;
+  $('export-motion').disabled = busy || !Object.values(vision.dynamic.classifier.examples).some(clips => clips.length);
 }
 function finishCalibration() {
   vision.cancelCalibration();
+  vision.reset();
   $('start-game').disabled = false;
   $('calibration-class').disabled = engine.state === 'running';
   $('cancel-calibration').hidden = true;
   renderReference();
 }
-for (const label of [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789']) {
-  const option = document.createElement('option'); option.value = label; option.textContent = label;
+for (const label of [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', 'UNKNOWN']) {
+  const option = document.createElement('option'); option.value = label; option.textContent = label === 'UNKNOWN' ? 'Movimento incorreto (rejeição)' : label;
   $('calibration-class').append(option);
 }
-$('calibration-class').addEventListener('change', renderReference);
+$('calibration-class').addEventListener('change', () => {
+  if (engine.state === 'running') return;
+  vision.setTarget($('calibration-class').value === 'UNKNOWN' ? 'J' : $('calibration-class').value);
+  $('recognition-hint').textContent = `Teste livre: ${$('calibration-class').value === 'UNKNOWN' ? 'movimento de rejeição' : $('calibration-class').value}. A partida começa com ${engine.current.target}.`;
+  $('calibration-status').textContent = ''; renderReference();
+});
 $('save-example').addEventListener('click', () => {
   if (engine.state === 'running') return;
   try {
@@ -823,9 +1111,37 @@ $('save-example').addEventListener('click', () => {
     $('calibration-status').textContent = 'Prepare o sinal escolhido. A captura começa em 2 segundos…';
     $('save-example').disabled = true; $('start-game').disabled = true; $('calibration-class').disabled = true;
     $('cancel-calibration').hidden = false;
+    renderReference();
   } catch (error) { $('calibration-status').textContent = error.message; }
 });
 $('cancel-calibration').addEventListener('click', () => { finishCalibration(); $('calibration-status').textContent = 'Captura cancelada; nenhum exemplo foi salvo.'; });
+$('remove-motion').addEventListener('click', () => {
+  if (engine.state === 'running' || vision.calibration) return;
+  try {
+    profile = store.removeLastMotion(profile.name, $('calibration-class').value);
+    vision.setMotionExamples(profile.motionExamples); renderReference();
+    $('calibration-status').textContent = 'Último movimento desta classe removido.';
+  } catch (error) { report(error); }
+});
+$('export-motion').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify({ version: MOTION_VERSION, examples: vision.dynamic.classifier.examples })], { type: 'application/json' });
+  const url = URL.createObjectURL(blob), anchor = document.createElement('a');
+  anchor.href = url; anchor.download = 'libras-movimentos-v1.json'; anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+$('import-motion').addEventListener('change', async event => {
+  const file = event.target.files?.[0], token = session;
+  event.target.value = '';
+  if (!file || engine.state === 'running' || vision.calibration) return;
+  try {
+    if (file.size > 2000000) throw new Error('O arquivo excede o limite de 2 MB.');
+    const payload = JSON.parse(await file.text());
+    if (token !== session || engine.state === 'running' || vision.calibration) return;
+    profile = store.importMotion(profile.name, payload);
+    vision.setMotionExamples(profile.motionExamples); renderReference();
+    $('calibration-status').textContent = 'Movimentos importados neste perfil. Teste com execuções novas.';
+  } catch (error) { report(new Error(`Importação não concluída: ${error.message}`)); }
+});
 function releaseHold() {
   holding = false;
   $('simulate-hold').setAttribute('aria-pressed', 'false');
@@ -869,15 +1185,16 @@ $('enable-camera').addEventListener('click', async () => {
 $('start-game').addEventListener('click', () => {
   if (vision.calibration) return;
   if (!simulated && !vision.ready) { $('game-feedback').textContent = 'Ative a câmera e aguarde a preparação dos exemplos para iniciar.'; return; }
-  const missing = [...new Set(sequence.map(step => step.target))].filter(label => !['J', 'Z', 'X'].includes(label) && !vision.classifier.hasClass(label));
+  const missing = [...new Set(sequence.map(step => step.target))].filter(label => ['J', 'Z', 'X'].includes(label) ? !vision.dynamic.classifier.hasClass(label) : !vision.classifier.hasClass(label));
   if (!simulated && missing.length) {
     $('game-feedback').textContent = `Faltam exemplos de: ${missing.join(', ')}. Salve esses sinais no painel de ajuste antes de iniciar.`;
     $('calibration-panel').open = true;
-    $('calibration-class').value = missing[0]; renderReference();
+    $('calibration-class').value = missing[0]; vision.setTarget(missing[0]); renderReference();
     return;
   }
   engine.start(sequence); vision.setTarget(engine.current.target);
   $('save-example').disabled = true; $('calibration-class').disabled = true;
+  renderReference();
   dropUntil = 0; lastMockAt = 0;
   $('start-game').hidden = true;
   $('simulate-hold').disabled = false; $('simulate-drop').disabled = false;

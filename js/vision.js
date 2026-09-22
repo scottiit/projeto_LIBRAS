@@ -1,5 +1,6 @@
-import { DYNAMIC_CLASSES, DynamicRecognizer, isValidHand } from './trajectory.js';
+import { DYNAMIC_CLASSES, isValidHand } from './trajectory.js';
 import { SignClassifier, CalibrationSession } from './classifier.js';
+import { TemporalRecognizer, MotionCapture, MOTION_LABELS } from './dynamic.js';
 const CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240';
 
 /** Replace this adapter with a TensorFlow.js classifier returning the same contract.
@@ -31,16 +32,17 @@ export class VisionController {
     Object.assign(this, { video, canvas, onFrame, onStatus });
     this.onCalibration = onCalibration;
     this.classifier = new SignClassifier();
-    this.dynamic = new DynamicRecognizer();
+    this.dynamic = new TemporalRecognizer();
     this.generation = 0;
     this.revision = 0;
     this.target = null;
   }
   setPersonalExamples(examples) { this.classifier.setPersonalExamples(examples); }
+  setMotionExamples(examples) { this.dynamic.setExamples(examples); }
   startCalibration(label) {
     if (!this.ready) throw new Error('Ative a câmera e aguarde a preparação dos exemplos antes de ensinar um sinal.');
     this.reset();
-    this.calibration = new CalibrationSession(label, performance.now());
+    this.calibration = MOTION_LABELS.includes(label) ? new MotionCapture(label, performance.now()) : new CalibrationSession(label, performance.now());
   }
   cancelCalibration() { this.calibration = null; }
   setTarget(target) { this.target = target; this.reset(); }
@@ -94,20 +96,19 @@ export class VisionController {
     this.draw(hand);
     if (target !== this.target || revision !== this.revision) return;
     const aspectRatio = this.video.videoHeight ? this.video.videoWidth / this.video.videoHeight : 1;
+    // Hands labels assume mirrored input, but send() receives raw video.
+    const rawLabel = results.multiHandedness?.[0]?.label;
+    const handedness = rawLabel === 'Left' ? 'Right' : rawLabel === 'Right' ? 'Left' : null;
     if (this.calibration) {
-      const status = this.calibration.observe(hand, time, aspectRatio);
+      const status = this.calibration.observe(hand, time, aspectRatio, handedness);
       if (['complete', 'timeout'].includes(status.state)) this.calibration = null;
       this.onCalibration(status);
       return;
     }
     let prediction = null;
     if (isValidHand(hand)) {
-      // Hands labels assume mirrored input, but send() receives raw video.
-      // Swap labels here; coordinates are mirrored once in TrajectoryBuffer.
-      const rawLabel = results.multiHandedness?.[0]?.label;
-      const handedness = rawLabel === 'Left' ? 'Right' : 'Left';
       prediction = DYNAMIC_CLASSES.has(target)
-        ? { targetClass: target, confidenceProbability: rawLabel ? this.dynamic.predict(hand, target, time, handedness) : 0, timestamp: Date.now(), source: 'heuristic' }
+        ? this.dynamic.predict(hand, time, handedness, aspectRatio)
         : this.classifier.predict(hand, /^\d$/.test(target) ? 'numbers' : 'alphabet', aspectRatio);
     } else this.dynamic.reset();
     if (generation === this.generation && target === this.target && revision === this.revision) this.onFrame(prediction, time, isValidHand(hand));
