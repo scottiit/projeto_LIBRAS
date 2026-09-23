@@ -9,11 +9,11 @@ const exampleHand = label => {
   const example = SIGN_EXAMPLES.find(example => example.label === label);
   return coordinatesToHand(example.coordinates).map(point => ({ x: point.x * example.aspectRatio, y: point.y, z: point.z * example.aspectRatio }));
 };
-test('bundled data covers all 23 static classes including E, T and U', () => {
-  assert.equal(DATASET_METADATA.staticClasses.length, 23);
+test('bundled data covers all 22 static classes including E, T and U', () => {
+  assert.equal(DATASET_METADATA.staticClasses.length, 22);
   const classifier = new SignClassifier();
   for (const label of DATASET_METADATA.staticClasses) assert.equal(classifier.hasClass(label), true);
-  for (const label of ['J', 'Z', 'X', '0', '9']) assert.equal(classifier.hasClass(label), false);
+  for (const label of ['J', 'K', 'Z', 'X', '0', '9']) assert.equal(classifier.hasClass(label), false);
 });
 test('all reference examples are classified by their actual class, independent of the game target', () => {
   const classifier = new SignClassifier();

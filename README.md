@@ -68,18 +68,18 @@ Para testar o reconhecimento pela webcam, use `localhost` por uma das duas opç�
 ## Usar o piloto
 
 1. Crie ou selecione um perfil.
-2. Escolha um dos seis jogos. A câmera é o modo padrão.
-3. Clique em **Ativar câmera**. Na primeira ativação da sessão, aguarde o aplicativo preparar as referências locais usando a mesma versão do MediaPipe da webcam.
-4. Faça um sinal. A interface mostra a classe efetivamente identificada, por exemplo, **Detectado: A**. Esse diagnóstico funciona antes de iniciar a partida.
-5. Clique em **Iniciar partida**. Um sinal só avança quando a classe correta mantém escore estritamente superior a 85% por pelo menos 1000 ms contínuos.
-6. Se o reconhecimento estiver incerto, abra **Ver referência e ajustar à minha mão**. Escolha o sinal, confira a referência e salve exemplos pessoais. O aplicativo aguarda dois segundos para posicionamento e captura 1,2 segundo de pose estável.
+2. Use a aba **Treinamento** para consultar referências, ensinar sinais à sua câmera e testar o reconhecimento. Referências, captura e gerenciamento de exemplos pertencem exclusivamente a essa aba; nenhum minigame contém esses controles. No celular, toque em **Referência** para expandir a imagem ou o vídeo.
+3. Escolha um dos seis jogos. Clique em **Ativar câmera** e aguarde o preparo das referências locais na primeira ativação da sessão.
+4. Faça um sinal. A interface mostra a classe identificada, por exemplo, **Detectado: A**. O indicador sobre a câmera mostra quando um movimento está **PRONTO** para começar e quando está **LENDO MOVIMENTO**. O jogo não salva exemplos; **GRAVANDO EXEMPLO** aparece somente durante uma captura iniciada no Treinamento.
+5. Toque em **Iniciar partida**, logo abaixo da câmera. Há uma contagem visível de **3, 2, 1** para se preparar. O cronômetro e a validação começam somente ao fim da contagem. Sair da tela, desligar a câmera ou ocultar a página cancela a contagem.
+6. Um sinal só avança quando a classe correta mantém escore estritamente superior a 85% por pelo menos 1000 ms contínuos. Se faltarem exemplos, a partida informa quais são. Toque em **← Desafios** e abra a aba **Treinamento** para prepará-los. As abas aparecem apenas nas telas de Desafios e Treinamento; durante a partida, a navegação fica fora da área de prática. Sair de uma captura cancela a coleta e libera novamente o seletor.
 
 Os exemplos pessoais guardam apenas landmarks normalizados no perfil local. A captura aprende a pose mostrada; ela não verifica se o sinal ensinado está linguisticamente correto.
 
 ### Letras e números disponíveis
 
-- 23 letras estáticas usam exemplos do dataset local;
-- J, X e Z usam sequências pessoais comparadas por DTW; precisam de gravações no perfil antes de jogar;
+- 22 letras estáticas usam exemplos do dataset local;
+- J, K, X e Z usam sequências pessoais comparadas por DTW; precisam de gravações no perfil antes de jogar. K foi retirado das poses estáticas porque sua referência exige deslocamento da mão para cima;
 - o dataset original não contém numerais;
 - jogos de números exigem exemplos pessoais de cada numeral da sequência antes do início.
 
@@ -93,20 +93,19 @@ O classificador web compara landmarks normalizados com exemplos rotulados sem re
 
 O dataset é pequeno: contém 137 registros, não possui numerais e 20 letras têm somente uma amostra. A aplicação é um piloto experimental; não é um avaliador confiável de fluência ou correção linguística em LIBRAS.
 
-## Reconhecimento dinâmico: J, X e Z
+## Reconhecimento dinâmico: J, K, X e Z
 
 O motor temporal roda integralmente no navegador. O rastreador continua sendo o MediaPipe; a classificação dinâmica passou das regras geométricas fixas para **comparação de sequências por Dynamic Time Warping (DTW)**. O classificador estático permanece inalterado. Não há Random Forest, TensorFlow.js ou servidor de inferência neste caminho.
 
 ### Gravar e testar
 
-1. Entre em um jogo, ative a câmera e abra **Ver referência e ajustar à minha mão**, antes de iniciar a partida.
-2. Selecione **J**, **X** ou **Z**, confira o vídeo disponível e a execução com um instrutor. A seleção também muda o sinal em teste antes da partida.
-3. Clique em **Gravar um movimento**. Aguarde os dois segundos de preparação. Pare brevemente na posição inicial até aparecer **Pronto** sobre a câmera.
-4. Faça o movimento completo e pare na posição final. A captura detecta início e fim, salva uma sequência e informa a duração. Não clique novamente para encerrar. Há até 15 segundos para concluir a captura.
-5. Grave de **3 a 5 execuções corretas por classe**, com pequenas variações de velocidade e posição. Basta uma para habilitar a classe, mas isso não demonstra robustez. São mantidas as oito gravações mais recentes por classe; **Remover último movimento desta classe** permite desfazer uma captura ruim.
-6. Para testar, repita o sinal **sem gravar**. O reconhecedor compara todas as classes dinâmicas cadastradas e pode responder **não reconhecida**. Abra **Diagnóstico dos movimentos** para ver a distância de cada classe. A comparação exibida ao gravar usa somente os exemplos anteriores, antes de adicionar a nova captura.
-7. Escolha **Movimento incorreto (rejeição)** e grave contraexemplos: trajetórias invertidas, incompletas ou movimentos que estejam causando acertos indevidos. Eles competem com as letras; nunca contam como acerto.
-8. Inicie a partida. Faça o movimento e **mantenha a pose final por mais um segundo** depois do reconhecimento. Uma sequência reconhecida uma vez não aprova duas letras consecutivas: é necessário executar o movimento novamente.
+1. Entre na aba **Treinamento**, ative a câmera e selecione **J**, **K**, **X** ou **Z**. Confira o vídeo disponível e a execução com um instrutor. É possível alternar as abas e voltar ao mesmo desafio.
+2. Clique em **Gravar um movimento**. Aguarde dois segundos de preparação e pare brevemente na posição inicial. O indicador sobre a câmera mostra **PRONTO · MOVA** quando o segmentador estiver armado.
+3. Faça o movimento completo **depois** de aparecer PRONTO. Ao detectar o deslocamento, o indicador muda para **GRAVANDO EXEMPLO** e a borda da câmera fica vermelha. Pare na posição final; a captura detecta o fim, salva a sequência e informa a duração. Ao iniciar uma captura, a página traz a câmera para a área visível. Não clique novamente para encerrar. Há até 15 segundos para concluir a captura.
+4. Grave de **3 a 5 execuções corretas por classe**, com pequenas variações de velocidade e posição. Basta uma para habilitar a classe, mas isso não demonstra robustez. São mantidas as oito gravações mais recentes por classe. Em **Diagnóstico e exemplos salvos**, **Remover último movimento** permite desfazer uma captura ruim; exportação e importação também ficam nessa área.
+5. Para testar, repita o sinal **sem gravar**, após o indicador mostrar PRONTO. O reconhecedor compara todas as classes dinâmicas cadastradas e pode responder **não reconhecida**. Abra **Diagnóstico e exemplos salvos** para ver a distância de cada classe. A comparação exibida ao gravar usa somente os exemplos anteriores, antes de adicionar a nova captura.
+6. Escolha **Rejeição** e grave contraexemplos: trajetórias invertidas, incompletas ou movimentos que estejam causando acertos indevidos. Eles competem com as letras; nunca contam como acerto.
+7. Volte ao jogo, aguarde a contagem de três segundos, espere PRONTO, faça o movimento e **mantenha a pose final por mais um segundo** depois do reconhecimento. Uma sequência reconhecida uma vez não aprova duas letras consecutivas: é necessário executar o movimento novamente.
 
 As instruções de captura e confirmação aparecem sobre a câmera, inclusive em telas pequenas. O modo debug usa o mesmo reconhecedor real; a injeção manual continua disponível e seus recordes ficam separados.
 
@@ -123,7 +122,7 @@ Fluxo: `MediaPipe → segmentação → normalização/re-amostragem → DTW ent
 - **Custo local:** `c(a,b) = sqrt(dPose(a,b)^2 + (0.55 * ||trajetoria(a)-trajetoria(b)||)^2)`. `dPose` reutiliza a RMS ponderada do classificador estático: pontas dos dedos pesam 2 e o eixo Z pesa 0,45.
 - **DTW exato restrito:** `D(i,j) = c(i,j) + min(D(i-1,j), D(i,j-1), D(i-1,j-1))`, dentro de uma banda diagonal de 25% (8 amostras). Dividimos o custo acumulado pelo comprimento do caminho selecionado. A memória é linear; com 32 amostras e até 32 exemplos, o trabalho é limitado e ocorre ao concluir o movimento. Esta implementação **não é FastDTW** e não reproduz integralmente os artigos.
 - **Decisão:** por exemplo, calculamos `d = max(custoDTW, 0.6 * custoMedioDosExtremos)`, evitando que o alinhamento esconda início/fim incompatíveis. Escolhemos a menor distância por classe. `similaridade = exp(-0.5 * (d/0.22)^2)`; `separacao = clamp((dSegundo-dPrimeiro)/0.12, 0, 1)`; `escore = min(similaridade, 0.5+0.5*separacao)`. Sem segunda classe, usamos separação 1, o que torna especialmente importante gravar classes concorrentes e contraexemplos. Uma correspondência só é aceita acima de 0,85, e `UNKNOWN` sempre rejeita. Os limiares são iniciais, ainda sem calibração em uma base de validação.
-- **Independência do alvo:** `MotionClassifier.predict(clip)` não recebe a letra solicitada. O jogo encaminha J/X/Z ao domínio temporal e compara a classe retornada ao alvo somente depois. Portanto, este é reconhecimento de sinais isolados dentro de um domínio, não transcrição contínua de toda a língua.
+- **Independência do alvo:** `MotionClassifier.predict(clip)` não recebe a letra solicitada. O jogo encaminha J/K/X/Z ao domínio temporal e compara a classe retornada ao alvo somente depois. Portanto, este é reconhecimento de sinais isolados dentro de um domínio, não transcrição contínua de toda a língua.
 - **Continuidade:** depois de reconhecer a sequência, somente novos frames compatíveis com a pose final sustentam o escore por até 1,8 s. O `GameEngine` exige mais de 85% durante 1000 ms contínuos. Frame inválido, intervalo superior a 180 ms, troca de mão, mudança de pose ou troca de alvo revogam a evidência. O cronômetro geral continua correndo.
 
 O nome `confidenceProbability` é preservado no contrato do jogo, mas o valor é um **escore de semelhança não calibrado**, não uma acurácia medida. A rejeição reduz falsos positivos; não garante que qualquer movimento desconhecido será rejeitado.
@@ -142,7 +141,7 @@ O nome `confidenceProbability` é preservado no contrato do jogo, mas o valor é
 
 Este primeiro incremento cobre **movimentos isolados de uma mão**, com início e fim deliberadamente pausados. Não reconhece frases, sinais com duas mãos, localização relativa ao corpo ou expressões faciais. Não resolve a oclusão de dedos do rastreador. Os limiares de movimento ainda precisam ser ajustados com vídeos reais, especialmente para movimentos pequenos como X e para câmeras lentas. A simetria entre mãos é uma hipótese deste vocabulário reduzido, não uma regra universal de LIBRAS.
 
-Para avaliar a precisão, grave sessões diferentes das usadas como exemplos, inclua pessoas novas e movimentos incorretos, mantenha treino e teste separados por pessoa/sessão e meça confusão J/X/Z, rejeições incorretas, falsas aceitações e latência. A interface atual não automatiza essa avaliação. Nenhuma taxa dos artigos abaixo deve ser atribuída a este piloto.
+Para avaliar a precisão, grave sessões diferentes das usadas como exemplos, inclua pessoas novas e movimentos incorretos, mantenha treino e teste separados por pessoa/sessão e meça confusão J/K/X/Z, rejeições incorretas, falsas aceitações e latência. A interface atual não automatiza essa avaliação. Nenhuma taxa dos artigos abaixo deve ser atribuída a este piloto.
 
 ## Artigos e projetos utilizados como referência
 
@@ -222,3 +221,7 @@ O protótipo científico foi desenvolvido no contexto acadêmico da Universidade
 - Isabelle Vitória Santiago Mendonça;
 - Joanna Marieli Trindade do Nascimento;
 - Tatyana Franciele Brasil Machado.
+
+## Desenvolvimento do piloto web
+
+- Adriano Scotti — desenvolvimento e manutenção do Web App, integração do reconhecimento de sinais e evolução da arquitetura.

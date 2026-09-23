@@ -253,7 +253,7 @@ Não escolher um modelo por preferência tecnológica. Comparar alternativas no 
 
 ### Dificuldade
 
-J, X e Z são tratados por heurísticas geométricas. Elas observam um buffer de até 60 frames, detectam uma trajetória e exigem a pose terminal por um segundo. Os valores usados foram projetados e testados com trajetórias sintéticas, não calibrados em um conjunto representativo de usuários.
+J, K, X e Z usam segmentação de trajetória e comparação com exemplos pessoais por Dynamic Time Warping (DTW). Heurísticas geométricas delimitam o começo e o fim do movimento; a classe prevista depende da sequência completa. Depois, a engine exige confirmação contínua da pose terminal por um segundo. Os limiares foram testados sobretudo com trajetórias sintéticas, não calibrados em um conjunto representativo de usuários.
 
 Além de classificar o movimento, o sistema precisa descobrir quando ele começou e terminou. Velocidade, amplitude, direção, mão utilizada e FPS variam.
 
@@ -268,7 +268,7 @@ Além de classificar o movimento, o sistema precisa descobrir quando ele começo
 
 - coletar sequências completas com marcação de início e fim;
 - normalizar trajetória por escala, duração e orientação;
-- usar Dynamic Time Warping como baseline temporal;
+- validar e ajustar o baseline temporal por DTW com gravações independentes;
 - comparar TCN, LSTM/GRU ou Transformer pequeno;
 - adicionar uma classe “nenhum sinal/transição”;
 - avaliar streaming contínuo, não apenas clipes previamente segmentados.
@@ -546,7 +546,7 @@ Definir qual pipeline será oficial, automatizar exportação/build/testes e tra
 - isolamento de perfis e recordes;
 - normalização, escala, reflexão, proporção e algum ruído sintético;
 - rejeição de entradas inválidas e ambíguas;
-- trajetórias sintéticas de J, X e Z;
+- trajetórias sintéticas de J, K, X e Z;
 - persistência de exemplos pessoais;
 - reprocessamento diagnóstico de referências estáticas.
 
@@ -559,7 +559,7 @@ Definir qual pipeline será oficial, automatizar exportação/build/testes e tra
 - teste de lateralidade real;
 - teste em celulares e notebooks de desempenho baixo;
 - teste com iluminação, fundos e resoluções diferentes;
-- teste de J/X/Z realizados naturalmente;
+- teste de J/K/X/Z realizados naturalmente;
 - avaliação por especialista em LIBRAS;
 - estudo de usabilidade com iniciantes;
 - acessibilidade com diferentes capacidades motoras;
@@ -582,7 +582,7 @@ Definir qual pipeline será oficial, automatizar exportação/build/testes e tra
 2. Treinar Random Forest/SVM/MLP com os mesmos dados e a mesma divisão.
 3. Avaliar um classificador de recorte RGB nos pares com oclusão.
 4. Avaliar fusão de imagem e landmarks.
-5. Construir baseline temporal para J/X/Z.
+5. Validar o baseline temporal já implementado para J/K/X/Z com gravações de pessoas e sessões separadas.
 6. Calibrar escores e limiares por classe.
 
 ### P2 — para transformar piloto em produto testável

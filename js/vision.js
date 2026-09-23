@@ -69,7 +69,7 @@ export class VisionController {
     if (generation !== this.generation) return;
     hands.onResults(results => this.handleResults(results, generation));
     this.ready = true;
-    this.onStatus(`Câmera ativa · ${this.classifier.metadata.staticClasses.length} letras disponíveis. Posicione uma mão no enquadramento.`);
+    this.onStatus(`Câmera ativa · ${this.classifier.metadata.staticClasses.length} letras estáticas disponíveis. Posicione uma mão no enquadramento.`);
     const processFrame = async () => {
       if (generation !== this.generation) return;
       try {

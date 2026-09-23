@@ -33,7 +33,7 @@ for (const [index, row] of rows.entries()) {
   const coordinates = values.map(Number);
   if (!/^[A-Z]$/.test(label) || coordinates.length !== 63 || !coordinates.every(Number.isFinite)) throw new Error(`Invalid dataset row ${index + 2}`);
   counts[label] = (counts[label] ?? 0) + 1;
-  if (!['J', 'X', 'Z'].includes(label)) examples.push({ label, coordinates: coordinates.map(value => Number(value.toFixed(7))) });
+  if (!['J', 'K', 'X', 'Z'].includes(label)) examples.push({ label, coordinates: coordinates.map(value => Number(value.toFixed(7))) });
 }
 const references = {};
 for (const label of Object.keys(counts)) {

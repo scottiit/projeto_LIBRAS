@@ -8,11 +8,12 @@ import { GameEngine } from '../js/engine.js';
 import { VisionController } from '../js/vision.js';
 
 // Synthetic geometry tests verify the algorithm, NOT linguistic validity or
-// real-world J/X/Z accuracy. Production ships no synthetic training templates.
+// real-world J/K/X/Z accuracy. Production ships no synthetic training templates.
 const base = coordinatesToHand(SIGN_EXAMPLES.find(example => example.label === 'I').coordinates);
 const pathPoints = {
   Z: [[0, 0], [.18, 0], [0, .18], [.18, .18]],
   J: [[0, 0], [0, .13], [-.04, .22], [-.15, .16]],
+  K: [[0, 0], [0, -.07], [0, -.14], [0, -.22]],
   X: [[0, 0], [-.08, 0], [-.16, 0], [-.2, -.04]],
   BAD: [[0, 0], [0, -.1], [.18, -.18], [.2, -.2]],
 };
@@ -38,7 +39,7 @@ function capture(label, options) {
   }
   assert.fail(`No clip captured for ${label}`);
 }
-const samples = () => ({ J: [capture('J')], X: [capture('X')], Z: [capture('Z')] });
+const samples = () => ({ J: [capture('J')], K: [capture('K')], X: [capture('X')], Z: [capture('Z')] });
 
 test('segmentation encodes bounded shape + anchored trajectory, not a stationary pose', () => {
   const clip = capture('Z');
@@ -54,11 +55,34 @@ test('segmentation encodes bounded shape + anchored trajectory, not a stationary
 
 test('DTW tolerates speed, FPS, handedness, image aspect and scale without erasing path', () => {
   const classifier = new MotionClassifier(samples());
-  for (const label of ['J', 'X', 'Z']) for (const options of [{ speed: 1.4, step: 40 }, { speed: .8, step: 25 }, { scale: 1.4, mirror: true, aspect: 16 / 9 }, { warp: true }]) {
+  for (const label of ['J', 'K', 'X', 'Z']) for (const options of [{ speed: 1.4, step: 40 }, { speed: .8, step: 25 }, { scale: 1.4, mirror: true, aspect: 16 / 9 }, { warp: true }]) {
     const prediction = classifier.predict(capture(label, options));
     assert.equal(prediction.targetClass, label, `${label}: ${JSON.stringify(prediction.alternatives)}`);
     assert.ok(prediction.confidenceProbability > .85);
   }
+});
+
+test('K is classified from upward trajectory and cannot pass as a stationary pose', () => {
+  const classifier = new MotionClassifier(samples());
+  assert.equal(classifier.predict(capture('K')).targetClass, 'K');
+  assert.equal(classifier.predict(capture('BAD')).targetClass, null);
+  const recognizer = new TemporalRecognizer(samples());
+  for (let time = 0; time < 1800; time += 50) {
+    const prediction = recognizer.predict(base, time, 'Right');
+    assert.notEqual(prediction.targetClass, 'K');
+  }
+  assert.throws(() => new MotionCapture('A', 0));
+  assert.equal(new MotionCapture('K', 0).label, 'K');
+});
+
+test('K exposes READY before movement and RECORDING at its first detected displacement', () => {
+  const states = frames('K');
+  const segmenter = new MotionSegmenter();
+  const observed = states.map(f => segmenter.observe(f.hand, f.time, f.handedness, f.aspect).state);
+  const ready = observed.indexOf('ready'), recording = observed.indexOf('recording');
+  assert.ok(ready >= 0 && recording > ready);
+  assert.ok(observed.includes('complete'));
+  assert.ok(!observed.slice(0, ready).includes('recording'));
 });
 
 test('finger flexion and relative depth can encode motion with a stationary wrist', () => {

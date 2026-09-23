@@ -2,7 +2,7 @@ import { isValidHand, DYNAMIC_CLASSES } from './trajectory.js';
 import { normalizeHand, featureDistance } from './classifier.js';
 
 export const MOTION_VERSION = 1;
-export const MOTION_LABELS = ['J', 'X', 'Z', 'UNKNOWN'];
+export const MOTION_LABELS = ['J', 'K', 'X', 'Z', 'UNKNOWN'];
 export const MOTION_LIMIT = 8;
 const MOTION_SAMPLES = 32;
 const MOTION_GAP = 180;
