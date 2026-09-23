@@ -9,11 +9,19 @@ const exampleHand = label => {
   const example = SIGN_EXAMPLES.find(example => example.label === label);
   return coordinatesToHand(example.coordinates).map(point => ({ x: point.x * example.aspectRatio, y: point.y, z: point.z * example.aspectRatio }));
 };
-test('bundled data covers all 22 static classes including E, T and U', () => {
-  assert.equal(DATASET_METADATA.staticClasses.length, 22);
+test('bundled data covers all 21 static classes including E, T and U', () => {
+  assert.equal(DATASET_METADATA.staticClasses.length, 21);
   const classifier = new SignClassifier();
   for (const label of DATASET_METADATA.staticClasses) assert.equal(classifier.hasClass(label), true);
-  for (const label of ['J', 'K', 'Z', 'X', '0', '9']) assert.equal(classifier.hasClass(label), false);
+  for (const label of ['H', 'J', 'K', 'Z', 'X', '0', '9']) assert.equal(classifier.hasClass(label), false);
+});
+test('legacy H static examples are ignored and H requires motion capture', () => {
+  const coordinates = SIGN_EXAMPLES.find(example => example.label === 'A').coordinates;
+  const classifier = new SignClassifier([{ label: 'H', coordinates }]);
+  classifier.setPersonalExamples({ H: [normalizeHand(exampleHand('A'))] });
+  assert.equal(classifier.hasClass('H'), false);
+  assert.equal(classifier.predict(exampleHand('A')).targetClass, null);
+  assert.throws(() => new CalibrationSession('H', 0));
 });
 test('all reference examples are classified by their actual class, independent of the game target', () => {
   const classifier = new SignClassifier();
@@ -106,4 +114,5 @@ test('calibration storage is bounded, profile-scoped and migration enables camer
   store.saveSettings('Ana', { simulation: true });
   assert.equal(store.login('Ana').settings.simulation, true);
   assert.throws(() => store.saveExamples('Ana', 'J', samples));
+  assert.throws(() => store.saveExamples('Ana', 'H', samples));
 });

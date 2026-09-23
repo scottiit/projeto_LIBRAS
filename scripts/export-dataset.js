@@ -1,6 +1,7 @@
 // Reproducible browser dataset. No Python runtime or pickle deserialization on clients.
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { DYNAMIC_CLASSES } from '../js/trajectory.js';
 const csv = readFileSync(new URL('../dataset_libras.csv', import.meta.url), 'utf8');
 const rows = csv.trim().split(/\r?\n/).slice(1);
 const examples = [], counts = {};
@@ -33,7 +34,7 @@ for (const [index, row] of rows.entries()) {
   const coordinates = values.map(Number);
   if (!/^[A-Z]$/.test(label) || coordinates.length !== 63 || !coordinates.every(Number.isFinite)) throw new Error(`Invalid dataset row ${index + 2}`);
   counts[label] = (counts[label] ?? 0) + 1;
-  if (!['J', 'K', 'X', 'Z'].includes(label)) examples.push({ label, coordinates: coordinates.map(value => Number(value.toFixed(7))) });
+  if (!DYNAMIC_CLASSES.has(label)) examples.push({ label, coordinates: coordinates.map(value => Number(value.toFixed(7))) });
 }
 const references = {};
 for (const label of Object.keys(counts)) {

@@ -2,7 +2,7 @@ import { isValidHand, DYNAMIC_CLASSES } from './trajectory.js';
 import { normalizeHand, featureDistance } from './classifier.js';
 
 export const MOTION_VERSION = 1;
-export const MOTION_LABELS = ['J', 'K', 'X', 'Z', 'UNKNOWN'];
+export const MOTION_LABELS = [...DYNAMIC_CLASSES, 'UNKNOWN'];
 export const MOTION_LIMIT = 8;
 const MOTION_SAMPLES = 32;
 const MOTION_GAP = 180;
@@ -11,6 +11,10 @@ const motionClamp = value => Math.max(0, Math.min(1, value));
 /** Coordinates in image-height units. Mirror X as on screen, then canonicalize
  * left hands to right hands. MediaPipe z is wrist-relative, NOT camera distance:
  * retain it for finger shape but never infer hand approach from wrist z.
+ * normalizeHand does NOT align away 3D rotation: a wrist rotation (H) changes
+ * local x/z even with a stationary wrist; upward translation (K) changes the
+ * anchored wrist path. These features depend on the tracker estimates; they
+ * do not reconstruct hidden joints or establish per-landmark visibility.
  */
 function motionFrame(hand, time, handedness, aspectRatio) {
   if (!isValidHand(hand) || !Number.isFinite(time) || !['Left', 'Right'].includes(handedness) || !Number.isFinite(aspectRatio) || aspectRatio <= 0) return null;

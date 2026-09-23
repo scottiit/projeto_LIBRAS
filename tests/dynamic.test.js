@@ -8,9 +8,10 @@ import { GameEngine } from '../js/engine.js';
 import { VisionController } from '../js/vision.js';
 
 // Synthetic geometry tests verify the algorithm, NOT linguistic validity or
-// real-world J/K/X/Z accuracy. Production ships no synthetic training templates.
+// real-world H/J/K/X/Z accuracy. Production ships no synthetic training templates.
 const base = coordinatesToHand(SIGN_EXAMPLES.find(example => example.label === 'I').coordinates);
 const pathPoints = {
+  H: [[0, 0], [0, 0], [0, 0], [0, 0]],
   Z: [[0, 0], [.18, 0], [0, .18], [.18, .18]],
   J: [[0, 0], [0, .13], [-.04, .22], [-.15, .16]],
   K: [[0, 0], [0, -.07], [0, -.14], [0, -.22]],
@@ -26,7 +27,15 @@ function frames(label, { speed = 1, step = 50, scale = 1, mirror = false, aspect
     const index = Math.min(2, Math.floor(u * 3)), fraction = u * 3 - index;
     const x = points[index][0] + fraction * (points[index + 1][0] - points[index][0]);
     const y = points[index][1] + fraction * (points[index + 1][1] - points[index][1]);
-    const hand = base.map(point => ({ x: (.1 + scale * (point.x + x)) * (mirror ? -1 : 1) / aspect, y: .1 + scale * (point.y + y), z: point.z * scale / aspect }));
+    // H and K start from the exact same synthetic hand. Rotate H around the
+    // wrist's Y axis; translate K upwards. No finger pose changes are invented.
+    const angle = label === 'H' ? u * Math.PI / 2 : 0;
+    const hand = base.map(point => {
+      const dx = point.x - base[0].x, dz = point.z - base[0].z;
+      const rotatedX = base[0].x + dx * Math.cos(angle) + dz * Math.sin(angle);
+      const rotatedZ = base[0].z - dx * Math.sin(angle) + dz * Math.cos(angle);
+      return { x: (.1 + scale * (rotatedX + x)) * (mirror ? -1 : 1) / aspect, y: .1 + scale * (point.y + y), z: rotatedZ * scale / aspect };
+    });
     output.push({ hand, time: time + offset, handedness: mirror ? 'Left' : 'Right', aspect });
   }
   return output;
@@ -39,7 +48,7 @@ function capture(label, options) {
   }
   assert.fail(`No clip captured for ${label}`);
 }
-const samples = () => ({ J: [capture('J')], K: [capture('K')], X: [capture('X')], Z: [capture('Z')] });
+const samples = () => ({ H: [capture('H')], J: [capture('J')], K: [capture('K')], X: [capture('X')], Z: [capture('Z')] });
 
 test('segmentation encodes bounded shape + anchored trajectory, not a stationary pose', () => {
   const clip = capture('Z');
@@ -55,11 +64,38 @@ test('segmentation encodes bounded shape + anchored trajectory, not a stationary
 
 test('DTW tolerates speed, FPS, handedness, image aspect and scale without erasing path', () => {
   const classifier = new MotionClassifier(samples());
-  for (const label of ['J', 'K', 'X', 'Z']) for (const options of [{ speed: 1.4, step: 40 }, { speed: .8, step: 25 }, { scale: 1.4, mirror: true, aspect: 16 / 9 }, { warp: true }]) {
+  for (const label of ['H', 'J', 'K', 'X', 'Z']) for (const options of [{ speed: 1.4, step: 40 }, { speed: .8, step: 25 }, { scale: 1.4, mirror: true, aspect: 16 / 9 }, { warp: true }]) {
     const prediction = classifier.predict(capture(label, options));
     assert.equal(prediction.targetClass, label, `${label}: ${JSON.stringify(prediction.alternatives)}`);
     assert.ok(prediction.confidenceProbability > .85);
   }
+});
+
+test('H wrist rotation and K upward motion remain distinct with an identical initial hand', () => {
+  const h = capture('H'), k = capture('K');
+  assert.deepEqual(frames('H')[0].hand, frames('K')[0].hand);
+  assert.ok(h.frames.every(frame => frame[63] === 0 && frame[64] === 0));
+  assert.ok(h.frames.at(-1).slice(0, 63).some((value, axis) => Math.abs(value - h.frames[0][axis]) > .1));
+  assert.ok(k.frames.at(-1)[64] < -.3);
+  assert.ok(motionDtw(h, k) > .2);
+  const classifier = new MotionClassifier({ H: [h], K: [k] });
+  assert.equal(classifier.predict(h).targetClass, 'H');
+  assert.equal(classifier.predict(k).targetClass, 'K');
+  const recognizer = new TemporalRecognizer({ H: [h], K: [k] });
+  for (let time = 0; time < 2000; time += 50) assert.equal(recognizer.predict(frames('H')[0].hand, time, 'Right').targetClass, null);
+  assert.equal(new MotionCapture('H', 0).label, 'H');
+});
+
+test('a missing frame during H rotation discards the motion and never extrapolates a completion', () => {
+  const recognizer = new TemporalRecognizer(samples()), input = frames('H');
+  for (const frame of input.slice(0, 19)) recognizer.predict(frame.hand, frame.time, frame.handedness, frame.aspect);
+  assert.equal(recognizer.segmenter.state, 'recording');
+  const lost = recognizer.predict(null, input[19].time, 'Right');
+  assert.equal(lost.state, 'tracking-lost');
+  assert.equal(recognizer.segmenter.frames.length, 0);
+  for (const frame of input.slice(20)) assert.equal(recognizer.predict(frame.hand, frame.time, frame.handedness, frame.aspect).targetClass, null);
+  const terminal = input.at(-1);
+  for (let time = terminal.time + 50; time <= terminal.time + 1500; time += 50) assert.equal(recognizer.predict(terminal.hand, time, 'Right').targetClass, null);
 });
 
 test('K is classified from upward trajectory and cannot pass as a stationary pose', () => {
@@ -238,4 +274,22 @@ test('vision routes sequences through DTW without relabeling them as the request
   assert.equal(captures.at(-1).state, 'complete');
   assert.equal(observations.length, previousCount, 'recording never supplies a scoring frame');
   assert.equal(vision.calibration, null);
+});
+
+test('vision routes H and K through competing motion templates instead of static poses', async context => {
+  globalThis.document = { hidden: false };
+  context.after(() => { delete globalThis.document; });
+  const observations = [];
+  const vision = new VisionController({ videoWidth: 100, videoHeight: 100 }, {}, prediction => observations.push(prediction), () => {}, () => {});
+  vision.draw = () => {};
+  vision.setMotionExamples(samples());
+  for (const [target, performed] of [['H', 'K'], ['K', 'H']]) {
+    vision.setTarget(target);
+    for (const frame of frames(performed)) {
+      vision.captureTarget = target; vision.captureTime = frame.time; vision.captureRevision = vision.revision;
+      await vision.handleResults({ multiHandLandmarks: [frame.hand], multiHandedness: [{ label: 'Left' }] }, vision.generation);
+    }
+    assert.equal(observations.at(-1).source, 'dtw');
+    assert.equal(observations.at(-1).targetClass, performed);
+  }
 });

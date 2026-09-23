@@ -1,4 +1,5 @@
-export const DYNAMIC_CLASSES = new Set(['J', 'K', 'Z', 'X']);
+// Single registry shared by inference, calibration, storage and dataset export.
+export const DYNAMIC_CLASSES = new Set(['H', 'J', 'K', 'X', 'Z']);
 export const isValidHand = hand => Array.isArray(hand) && hand.length === 21 && hand.every(point => point && ['x', 'y', 'z'].every(axis => Number.isFinite(point[axis])));
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const delta = (a, b) => ({ x: b.x - a.x, y: b.y - a.y, z: b.z - a.z });

@@ -253,7 +253,7 @@ Não escolher um modelo por preferência tecnológica. Comparar alternativas no 
 
 ### Dificuldade
 
-J, K, X e Z usam segmentação de trajetória e comparação com exemplos pessoais por Dynamic Time Warping (DTW). Heurísticas geométricas delimitam o começo e o fim do movimento; a classe prevista depende da sequência completa. Depois, a engine exige confirmação contínua da pose terminal por um segundo. Os limiares foram testados sobretudo com trajetórias sintéticas, não calibrados em um conjunto representativo de usuários.
+H, J, K, X e Z usam segmentação de trajetória e comparação com exemplos pessoais por Dynamic Time Warping (DTW). Heurísticas geométricas delimitam o começo e o fim do movimento; a classe prevista depende da sequência completa. Depois, a engine exige confirmação contínua da pose terminal por um segundo. Os limiares foram testados sobretudo com trajetórias sintéticas, não calibrados em um conjunto representativo de usuários.
 
 Além de classificar o movimento, o sistema precisa descobrir quando ele começou e terminou. Velocidade, amplitude, direção, mão utilizada e FPS variam.
 
@@ -281,7 +281,7 @@ Definir se o piloto continuará com poucos sinais dinâmicos e heurísticas audi
 
 ### Dificuldade
 
-O requisito de mais de 85% por 1000 ms reduz falsos positivos isolados, mas depende de o escore significar algo consistente. Hoje, o classificador estático produz semelhança geométrica; as heurísticas dinâmicas retornam um valor experimental fixo. Esses valores não têm a mesma interpretação estatística.
+O requisito de mais de 85% por 1000 ms reduz falsos positivos isolados, mas depende de o escore significar algo consistente. Hoje, o classificador estático produz semelhança geométrica; o motor dinâmico produz semelhança entre sequências por DTW, combinada com a separação entre classes. Nenhum desses escores é uma probabilidade calibrada de acerto.
 
 O limite atual de 180 ms entre observações exige aproximadamente 6 FPS ou mais. Dispositivos lentos podem reiniciar a confirmação mesmo quando o usuário mantém o sinal corretamente.
 
@@ -546,7 +546,7 @@ Definir qual pipeline será oficial, automatizar exportação/build/testes e tra
 - isolamento de perfis e recordes;
 - normalização, escala, reflexão, proporção e algum ruído sintético;
 - rejeição de entradas inválidas e ambíguas;
-- trajetórias sintéticas de J, K, X e Z;
+- trajetórias sintéticas de H, J, K, X e Z;
 - persistência de exemplos pessoais;
 - reprocessamento diagnóstico de referências estáticas.
 
@@ -559,7 +559,7 @@ Definir qual pipeline será oficial, automatizar exportação/build/testes e tra
 - teste de lateralidade real;
 - teste em celulares e notebooks de desempenho baixo;
 - teste com iluminação, fundos e resoluções diferentes;
-- teste de J/K/X/Z realizados naturalmente;
+- teste de H/J/K/X/Z realizados naturalmente;
 - avaliação por especialista em LIBRAS;
 - estudo de usabilidade com iniciantes;
 - acessibilidade com diferentes capacidades motoras;
@@ -582,7 +582,7 @@ Definir qual pipeline será oficial, automatizar exportação/build/testes e tra
 2. Treinar Random Forest/SVM/MLP com os mesmos dados e a mesma divisão.
 3. Avaliar um classificador de recorte RGB nos pares com oclusão.
 4. Avaliar fusão de imagem e landmarks.
-5. Validar o baseline temporal já implementado para J/K/X/Z com gravações de pessoas e sessões separadas.
+5. Validar o baseline temporal já implementado para H/J/K/X/Z com gravações de pessoas e sessões separadas.
 6. Calibrar escores e limiares por classe.
 
 ### P2 — para transformar piloto em produto testável

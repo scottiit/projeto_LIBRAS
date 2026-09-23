@@ -101,7 +101,7 @@ function motionMessage(status) {
     'too-long': 'Movimento longo demais. Recomece e conclua em até 4,5 segundos.',
     'too-short': 'Movimento curto demais. Recomece com a trajetória completa.',
     restart: 'Prepare a posição inicial e repita o movimento.',
-    rejected: status.reason === 'no-examples' ? 'Grave movimentos de J, K, X e Z no Treinamento.' : status.reason === 'negative' ? 'Movimento semelhante a um exemplo de rejeição. Tente novamente.' : 'Movimento incerto. Confira a referência e repita a trajetória completa.',
+    rejected: status.reason === 'no-examples' ? 'Grave movimentos de H, J, K, X e Z no Treinamento.' : status.reason === 'negative' ? 'Movimento semelhante a um exemplo de rejeição. Tente novamente.' : 'Movimento incerto. Confira a referência e repita a trajetória completa.',
   };
   return messages[status.state] ?? 'Aguardando movimento.';
 }
@@ -200,7 +200,7 @@ function dashboard() {
   $('simulation').checked = simulated;
   $('profile-greeting').textContent = profile.name;
   $('visit-count').textContent = profile.accessHistory.length;
-  $('mode-explanation').textContent = simulated ? 'Modo debug: o reconhecimento pela câmera continua ativo e você também pode injetar acertos manualmente. Os tempos ficam separados.' : '22 letras têm exemplos estáticos. Treine os movimentos de J, K, X e Z e salve poses pessoais para números.';
+  $('mode-explanation').textContent = simulated ? 'Modo debug: o reconhecimento pela câmera continua ativo e você também pode injetar acertos manualmente. Os tempos ficam separados.' : `${vision.classifier.metadata.staticClasses.length} letras têm exemplos estáticos. Treine os movimentos de H, J, K, X e Z e salve poses pessoais para números.`;
   $('game-grid').replaceChildren();
   MODES.forEach(mode => {
     const button = document.createElement('button');

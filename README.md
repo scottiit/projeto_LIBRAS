@@ -78,8 +78,8 @@ Os exemplos pessoais guardam apenas landmarks normalizados no perfil local. A ca
 
 ### Letras e números disponíveis
 
-- 22 letras estáticas usam exemplos do dataset local;
-- J, K, X e Z usam sequências pessoais comparadas por DTW; precisam de gravações no perfil antes de jogar. K foi retirado das poses estáticas porque sua referência exige deslocamento da mão para cima;
+- 21 letras estáticas usam 32 exemplos do dataset local;
+- H, J, K, X e Z usam sequências pessoais comparadas por DTW; precisam de gravações no perfil antes de jogar. H e K foram retirados das poses estáticas para distinguir a rotação do punho do deslocamento da mão para cima;
 - o dataset original não contém numerais;
 - jogos de números exigem exemplos pessoais de cada numeral da sequência antes do início.
 
@@ -93,13 +93,13 @@ O classificador web compara landmarks normalizados com exemplos rotulados sem re
 
 O dataset é pequeno: contém 137 registros, não possui numerais e 20 letras têm somente uma amostra. A aplicação é um piloto experimental; não é um avaliador confiável de fluência ou correção linguística em LIBRAS.
 
-## Reconhecimento dinâmico: J, K, X e Z
+## Reconhecimento dinâmico: H, J, K, X e Z
 
 O motor temporal roda integralmente no navegador. O rastreador continua sendo o MediaPipe; a classificação dinâmica passou das regras geométricas fixas para **comparação de sequências por Dynamic Time Warping (DTW)**. O classificador estático permanece inalterado. Não há Random Forest, TensorFlow.js ou servidor de inferência neste caminho.
 
 ### Gravar e testar
 
-1. Entre na aba **Treinamento**, ative a câmera e selecione **J**, **K**, **X** ou **Z**. Confira o vídeo disponível e a execução com um instrutor. É possível alternar as abas e voltar ao mesmo desafio.
+1. Entre na aba **Treinamento**, ative a câmera e selecione **H**, **J**, **K**, **X** ou **Z**. Confira o vídeo disponível e a execução com um instrutor. Para sair de uma partida, use **← Desafios** e depois abra o Treinamento.
 2. Clique em **Gravar um movimento**. Aguarde dois segundos de preparação e pare brevemente na posição inicial. O indicador sobre a câmera mostra **PRONTO · MOVA** quando o segmentador estiver armado.
 3. Faça o movimento completo **depois** de aparecer PRONTO. Ao detectar o deslocamento, o indicador muda para **GRAVANDO EXEMPLO** e a borda da câmera fica vermelha. Pare na posição final; a captura detecta o fim, salva a sequência e informa a duração. Ao iniciar uma captura, a página traz a câmera para a área visível. Não clique novamente para encerrar. Há até 15 segundos para concluir a captura.
 4. Grave de **3 a 5 execuções corretas por classe**, com pequenas variações de velocidade e posição. Basta uma para habilitar a classe, mas isso não demonstra robustez. São mantidas as oito gravações mais recentes por classe. Em **Diagnóstico e exemplos salvos**, **Remover último movimento** permite desfazer uma captura ruim; exportação e importação também ficam nessa área.
@@ -120,12 +120,31 @@ Fluxo: `MediaPipe → segmentação → normalização/re-amostragem → DTW ent
 - **Profundidade:** o `z` do MediaPipe é relativo ao pulso; permanece na forma dos dedos com peso reduzido. Não representa a distância absoluta da mão até a câmera. O motor não usa `z` do pulso como prova de aproximação do usuário. Veja a [documentação oficial de Hands](https://chuoling.github.io/mediapipe/solutions/hands.html#multi_hand_landmarks).
 - **Re-amostragem:** interpolação linear em instantes uniformes gera 32 amostras por sequência. A duração original também é armazenada. Isso normaliza a velocidade global; o DTW acomoda diferenças locais de velocidade. Não interpolamos sobre perda de tracking.
 - **Custo local:** `c(a,b) = sqrt(dPose(a,b)^2 + (0.55 * ||trajetoria(a)-trajetoria(b)||)^2)`. `dPose` reutiliza a RMS ponderada do classificador estático: pontas dos dedos pesam 2 e o eixo Z pesa 0,45.
-- **DTW exato restrito:** `D(i,j) = c(i,j) + min(D(i-1,j), D(i,j-1), D(i-1,j-1))`, dentro de uma banda diagonal de 25% (8 amostras). Dividimos o custo acumulado pelo comprimento do caminho selecionado. A memória é linear; com 32 amostras e até 32 exemplos, o trabalho é limitado e ocorre ao concluir o movimento. Esta implementação **não é FastDTW** e não reproduz integralmente os artigos.
+- **DTW exato restrito:** `D(i,j) = c(i,j) + min(D(i-1,j), D(i,j-1), D(i-1,j-1))`, dentro de uma banda diagonal de 25% (8 amostras). Dividimos o custo acumulado pelo comprimento do caminho selecionado. A memória é linear; com 32 amostras e até 48 exemplos (cinco sinais e a classe de rejeição, oito por classe), o trabalho é limitado e ocorre ao concluir o movimento. Esta implementação **não é FastDTW** e não reproduz integralmente os artigos.
 - **Decisão:** por exemplo, calculamos `d = max(custoDTW, 0.6 * custoMedioDosExtremos)`, evitando que o alinhamento esconda início/fim incompatíveis. Escolhemos a menor distância por classe. `similaridade = exp(-0.5 * (d/0.22)^2)`; `separacao = clamp((dSegundo-dPrimeiro)/0.12, 0, 1)`; `escore = min(similaridade, 0.5+0.5*separacao)`. Sem segunda classe, usamos separação 1, o que torna especialmente importante gravar classes concorrentes e contraexemplos. Uma correspondência só é aceita acima de 0,85, e `UNKNOWN` sempre rejeita. Os limiares são iniciais, ainda sem calibração em uma base de validação.
-- **Independência do alvo:** `MotionClassifier.predict(clip)` não recebe a letra solicitada. O jogo encaminha J/K/X/Z ao domínio temporal e compara a classe retornada ao alvo somente depois. Portanto, este é reconhecimento de sinais isolados dentro de um domínio, não transcrição contínua de toda a língua.
+- **Independência do alvo:** `MotionClassifier.predict(clip)` não recebe a letra solicitada. O jogo encaminha H/J/K/X/Z ao domínio temporal e compara a classe retornada ao alvo somente depois. Portanto, este é reconhecimento de sinais isolados dentro de um domínio, não transcrição contínua de toda a língua.
 - **Continuidade:** depois de reconhecer a sequência, somente novos frames compatíveis com a pose final sustentam o escore por até 1,8 s. O `GameEngine` exige mais de 85% durante 1000 ms contínuos. Frame inválido, intervalo superior a 180 ms, troca de mão, mudança de pose ou troca de alvo revogam a evidência. O cronômetro geral continua correndo.
 
 O nome `confidenceProbability` é preservado no contrato do jogo, mas o valor é um **escore de semelhança não calibrado**, não uma acurácia medida. A rejeição reduz falsos positivos; não garante que qualquer movimento desconhecido será rejeitado.
+
+### H versus K: rotação e oclusão
+
+Para as execuções adotadas neste piloto, H e K podem partir da mesma configuração de dedos. K desloca o pulso para cima (`y` diminui na imagem); H muda a orientação da mão. `normalizeHand` remove translação e escala, mas conserva a orientação. Portanto, no K a trajetória ancorada do pulso muda; no H as coordenadas locais, especialmente `x/z`, mudam mesmo com pulso parado. O DTW compara essas duas informações ao longo do tempo, sem uma regra fixa de ângulo para H.
+
+Uma rotação ideal em torno do eixo vertical pode ser descrita por `x' = x cos(θ) + z sin(θ)` e `z' = -x sin(θ) + z cos(θ)`, com coordenadas relativas ao pulso. Essa é a geometria usada nos testes sintéticos H/K; não reproduz a incerteza de uma câmera nem valida a execução linguística.
+
+O [artigo original do MediaPipe Hands, seção 2.2](https://arxiv.org/html/2006.10214v1#S2.SS2), descreve regressão de landmarks, incluindo profundidade relativa, e tratamento aprendido de visibilidade parcial. O MediaPipe pode continuar retornando 21 pontos mesmo com dedos encobertos. Isso não garante que as posições inferidas estejam corretas durante todo giro.
+
+| Saída do rastreador durante o giro | Comportamento atual do aplicativo |
+| --- | --- |
+| 21 pontos finitos e coerentes | Continua a leitura; pode reconhecer H se a sequência se parecer com os exemplos gravados. |
+| Pontos finitos, mas estimados incorretamente | Podem passar pelas validações e distorcer a comparação. O aplicativo não verifica visibilidade por articulação. |
+| Mão ausente ou pontos inválidos | Descarta imediatamente a sequência; não completa o movimento por extrapolação. |
+| Intervalo superior a 180 ms, troca da mão identificada ou salto geométrico excessivo | Reinicia a segmentação. |
+
+`minTrackingConfidence: 0.65` pertence ao rastreador; o limiar de 0.85 do jogo pertence à comparação dos sinais. São medidas distintas. Quando o rastreamento deixa de ser considerado válido, o MediaPipe pode executar novamente o detector de palma, conforme a [documentação de configuração](https://chuoling.github.io/mediapipe/solutions/hands.html#min_tracking_confidence). O app não usa filtro de Kalman, extrapolação de articulações nem o campo de visibilidade para atravessar oclusões; a interpolação de 32 amostras só reamostra sequências válidas.
+
+Grave exemplos novos de **H e K** no Treinamento para que as duas classes concorram na comparação. Poses estáticas antigas de H permanecem no armazenamento, mas são ignoradas na inferência; uma foto não pode ser convertida automaticamente em uma trajetória. A resistência à oclusão ainda exige avaliação com gravações reais e sessões independentes.
 
 ### Dados e módulos
 
@@ -141,7 +160,7 @@ O nome `confidenceProbability` é preservado no contrato do jogo, mas o valor é
 
 Este primeiro incremento cobre **movimentos isolados de uma mão**, com início e fim deliberadamente pausados. Não reconhece frases, sinais com duas mãos, localização relativa ao corpo ou expressões faciais. Não resolve a oclusão de dedos do rastreador. Os limiares de movimento ainda precisam ser ajustados com vídeos reais, especialmente para movimentos pequenos como X e para câmeras lentas. A simetria entre mãos é uma hipótese deste vocabulário reduzido, não uma regra universal de LIBRAS.
 
-Para avaliar a precisão, grave sessões diferentes das usadas como exemplos, inclua pessoas novas e movimentos incorretos, mantenha treino e teste separados por pessoa/sessão e meça confusão J/K/X/Z, rejeições incorretas, falsas aceitações e latência. A interface atual não automatiza essa avaliação. Nenhuma taxa dos artigos abaixo deve ser atribuída a este piloto.
+Para avaliar a precisão, grave sessões diferentes das usadas como exemplos, inclua pessoas novas e movimentos incorretos, mantenha treino e teste separados por pessoa/sessão e meça confusão H/J/K/X/Z, rejeições incorretas, falsas aceitações e latência. A interface atual não automatiza essa avaliação. Nenhuma taxa dos artigos abaixo deve ser atribuída a este piloto.
 
 ## Artigos e projetos utilizados como referência
 
@@ -153,6 +172,7 @@ As implementações JavaScript desta etapa são próprias. Os trabalhos em LIBRA
 4. **Belissen, V.; Braffort, A.; Gouiffès, M. (2020). _Dicta-Sign-LSF-v2: Remake of a Continuous French Sign Language Dialogue Corpus and a First Baseline for Automatic Sign Language Processing_. LREC 2020, pp. 6040–6048.** [Artigo e metadados na ACL Anthology](https://aclanthology.org/2020.lrec-1.740/). Consultado para distinguir reconhecimento isolado de processamento contínuo de LSF e orientar futuras avaliações. Não implementamos seu modelo nem incorporamos o corpus.
 5. **Henkel, C. e colaboradores (2023). _1st place solution to the Google – American Sign Language Fingerspelling Recognition competition_.** [Repositório da solução](https://github.com/ChristofHenkel/kaggle-asl-fingerspelling-1st-place-solution) · [Contexto oficial da competição, TensorFlow Blog](https://blog.tensorflow.org/2023/05/american-sign-language-fingerspelling-recognition.html). Consultado como alternativa futura baseada em modelos temporais aprendidos, com mais dados e infraestrutura. Código publicado sob Apache-2.0; não copiamos código, pesos ou vocabulário de ASL.
 6. **Google / MediaPipe. _Hands: Output e JavaScript Solution API_.** [Documentação oficial](https://chuoling.github.io/mediapipe/solutions/hands.html). Base da interpretação de coordenadas, profundidade relativa e handedness. Mantivemos a versão do runtime já usada pelo projeto (`@mediapipe/hands@0.4.1675469240`).
+7. **Zhang, F. et al. (2020). _MediaPipe Hands: On-device Real-time Hand Tracking_.** [Artigo original, arXiv:2006.10214](https://arxiv.org/abs/2006.10214) · [Texto completo](https://arxiv.org/html/2006.10214v1). Consultado para analisar estimação de pontos durante oclusão, profundidade relativa e recuperação após perda de rastreamento. Não demonstra desempenho específico para H/K em LIBRAS.
 
 Referências consultadas em setembro de 2026. ASL, LSF e LIBRAS são línguas diferentes: técnicas de processamento podem inspirar a implementação; rótulos, exemplos e validação linguística precisam ser específicos de LIBRAS.
 

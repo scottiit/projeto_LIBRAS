@@ -1,4 +1,5 @@
 import { MOTION_VERSION, MOTION_LABELS, MOTION_LIMIT, validMotionClip } from './dynamic.js';
+import { DYNAMIC_CLASSES } from './trajectory.js';
 const PREFIX = 'libras:v1:profile:';
 const validTime = value => Number.isFinite(value) && value > 0;
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -50,7 +51,7 @@ export class ProfileStore {
     return profile;
   }
   saveExamples(name, label, samples) {
-    if (!/^[A-Z0-9]$/.test(label) || ['J', 'K', 'X', 'Z'].includes(label) || !Array.isArray(samples) || !samples.length || samples.length > 12 || samples.some(sample => !Array.isArray(sample) || sample.length !== 63 || !sample.every(value => Number.isFinite(value) && Math.abs(value) <= 20))) throw new Error('Exemplos de sinal inválidos.');
+    if (!/^[A-Z0-9]$/.test(label) || DYNAMIC_CLASSES.has(label) || !Array.isArray(samples) || !samples.length || samples.length > 12 || samples.some(sample => !Array.isArray(sample) || sample.length !== 63 || !sample.every(value => Number.isFinite(value) && Math.abs(value) <= 20))) throw new Error('Exemplos de sinal inválidos.');
     const profile = this.read(name);
     if (!profile) throw new Error('Perfil não encontrado.');
     if (!isRecord(profile.signExamples)) profile.signExamples = {};
