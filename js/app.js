@@ -3,7 +3,7 @@ import { ProfileStore } from './storage.js';
 import { GameEngine } from './engine.js';
 import { VisionController, StaticClassifierMock } from './vision.js';
 import { SIGN_REFERENCES } from './dataset.js';
-import { MOTION_VERSION } from './dynamic.js';
+import { MOTION_VERSION, validMotionClip } from './dynamic.js';
 import { DYNAMIC_CLASSES } from './trajectory.js';
 
 const $ = id => document.getElementById(id);
@@ -79,6 +79,7 @@ const vision = new VisionController($('camera'), $('overlay'), (prediction, capt
         profile = store.saveMotion(profile.name, status.label, status.clip);
         vision.setMotionExamples(profile.motionExamples);
         $('calibration-status').textContent = `Movimento de ${status.label === 'UNKNOWN' ? 'rejeição' : status.label} salvo (${(status.clip.durationMs / 1000).toFixed(1)} s). Repita para testar; grave de 3 a 5 execuções variadas.`;
+        if (status.depth?.warnings?.length) $('calibration-status').textContent += ' A variação dos dedos ou da palma foi preservada no exemplo. Confira a execução com a referência.';
       } else {
         profile = store.saveExamples(profile.name, status.label, status.samples);
         vision.setPersonalExamples(profile.signExamples);
@@ -86,12 +87,26 @@ const vision = new VisionController($('camera'), $('overlay'), (prediction, capt
       }
     } catch (error) { report(new Error(`Os exemplos não foram salvos: ${error.message}`)); }
     finishCalibration();
-  } else if (status.state === 'timeout') {
-    $('calibration-status').textContent = 'Captura encerrada. Tente novamente com a mão inteira no enquadramento, pausando antes e depois do movimento.';
+  } else if (status.state === 'timeout' || status.state === 'depth-required') {
+    $('calibration-status').textContent = status.state === 'depth-required' ? `X não salvo: ${depthMessage(status.depth)} Clique em Gravar para tentar novamente.` : 'Captura encerrada. Tente novamente com a mão inteira no enquadramento, pausando antes e depois do movimento.';
+    if (status.depth) renderMotionDiagnostics({ reason: 'depth-required', depth: status.depth, alternatives: [] });
     finishCalibration();
   } else $('calibration-status').textContent = status.state === 'warmup' ? `Prepare o sinal. A captura começa em ${status.remaining}…` : status.dynamic ? motionMessage(status) : status.state === 'tracking-lost' ? 'Mão não detectada. A captura recomeçará ao enquadrá-la.' : `Mantenha a pose estável… ${Math.round(status.progress * 100)}%`;
   if (status.dynamic) $('confidence').textContent = status.state === 'complete' ? 'Captura concluída. Consulte o resultado no Treinamento.' : $('calibration-status').textContent;
 });
+function depthMessage(depth) {
+  const reduction = Number.isFinite(depth?.scaleRatio) ? ((1 - depth.scaleRatio) * 100).toFixed(1) : null;
+  const messages = {
+    'insufficient-retreat': `recuo pequeno: redução aparente de ${reduction ?? '—'}%; mínimo inicial de ${(depth?.minShrinkPercent ?? 9.5).toFixed(1)}%. Afaste um pouco mais a mão.`,
+    approach: 'a palma aumentou de tamanho, indicando aproximação. Faça o movimento de afastamento.',
+    'excessive-retreat': 'a mudança de tamanho foi excessiva. Faça um recuo menor, mantendo a mão no enquadramento.',
+    'palm-rotation': `houve um giro amplo da palma (aproximadamente ${Math.round(depth?.palmRotationDegrees ?? 0)}°), em vez de apenas recuo. Tente afastar com menos giro.`,
+    'scale-jump': 'o rastreamento apresentou um salto brusco de tamanho. Recomece com um movimento suave.',
+    'unstable-retreat': 'o tamanho da palma oscilou demais. Faça um recuo contínuo e pare antes de voltar.',
+    'missing-depth': 'este exemplo não contém a leitura de recuo. Grave um novo movimento.',
+  };
+  return messages[depth?.reason] ?? 'não foi possível confirmar o recuo. Afaste a mão e pare na posição final.';
+}
 function motionMessage(status) {
   if (status.state === 'confirming') return `Movimento: ${status.targetClass} · semelhança ${(status.confidenceProbability * 100).toFixed(1)}% · mantenha a pose final`;
   const messages = {
@@ -100,8 +115,9 @@ function motionMessage(status) {
     'tracking-lost': 'Rastreamento interrompido. Recomece pela posição inicial.',
     'too-long': 'Movimento longo demais. Recomece e conclua em até 4,5 segundos.',
     'too-short': 'Movimento curto demais. Recomece com a trajetória completa.',
+    'depth-required': depthMessage(status.depth),
     restart: 'Prepare a posição inicial e repita o movimento.',
-    rejected: status.reason === 'no-examples' ? 'Grave movimentos de H, J, K, X e Z no Treinamento.' : status.reason === 'negative' ? 'Movimento semelhante a um exemplo de rejeição. Tente novamente.' : 'Movimento incerto. Confira a referência e repita a trajetória completa.',
+    rejected: status.reason === 'no-examples' ? 'Grave movimentos de H, J, K, X e Z no Treinamento.' : status.reason === 'depth-required' ? depthMessage(status.depth) : status.reason === 'negative' ? 'Movimento semelhante a um exemplo de rejeição. Tente novamente.' : 'Movimento incerto. Confira a referência e repita a trajetória completa.',
   };
   return messages[status.state] ?? 'Aguardando movimento.';
 }
@@ -110,6 +126,7 @@ function showMotionState(status) {
   const capturing = screen === 'training' && Boolean(vision.calibration);
   document.body.dataset.capturing = String(capturing);
   const labels = { 'camera-off': 'CÂMERA DESLIGADA', warmup: `PREPARE-SE · ${status.remaining ?? 2}`, collecting: 'CAPTURANDO POSE', arming: 'POSIÇÃO INICIAL', ready: 'PRONTO · MOVA', recording: capturing ? 'GRAVANDO EXEMPLO' : 'LENDO MOVIMENTO', confirming: 'RECONHECIDO', rejected: 'NÃO RECONHECIDO', complete: 'CAPTURA CONCLUÍDA', 'tracking-lost': 'MÃO NÃO VISÍVEL', 'too-short': 'MOVIMENTO CURTO', 'too-long': 'MOVIMENTO LONGO', restart: 'RECOMECE' };
+  labels['depth-required'] = 'REFAÇA O RECUO';
   const active = screen === 'training' || (screen === 'game' && DYNAMIC_CLASSES.has(vision.target));
   $('motion-indicator').hidden = !active;
   $('motion-cue').hidden = !active || state === 'camera-off';
@@ -142,7 +159,10 @@ function renderMotionDiagnostics(prediction) {
     }
     $('motion-distances').append(row);
   }
-  $('motion-diagnostic-status').textContent = prediction.reason === 'no-examples' ? 'Ainda não há exemplos para comparação.' : `Última sequência: ${prediction.targetClass ?? 'não reconhecida'} · escore ${((prediction.similarityScore ?? 0) * 100).toFixed(1)}%. Menor distância indica maior semelhança. Capturas são comparadas antes de serem adicionadas à base.`;
+  $('motion-diagnostic-status').textContent = prediction.reason === 'depth-required' && prediction.source !== 'dtw' ? 'Captura de X recusada pela análise do recuo.' : prediction.reason === 'no-examples' ? 'Ainda não há exemplos para comparação.' : `Última sequência: ${prediction.targetClass ?? 'não reconhecida'} · escore ${((prediction.similarityScore ?? 0) * 100).toFixed(1)}%. Menor distância indica maior semelhança. Capturas são comparadas antes de serem adicionadas à base.`;
+  if (Number.isFinite(prediction.depth?.scaleRatio)) $('motion-diagnostic-status').textContent += ` Variação aparente da palma: ${((prediction.depth.scaleRatio - 1) * 100).toFixed(0)}% · recuo ${prediction.depth.eligible ? 'compatível' : 'não confirmado'}.`;
+  if (prediction.reason === 'depth-required') $('motion-diagnostic-status').textContent += ` Motivo: ${depthMessage(prediction.depth)}`;
+  if (prediction.depth?.warnings?.length) $('motion-diagnostic-status').textContent += ` Aviso de qualidade: variação de pose em ${(prediction.depth.poseVariationFraction * 100).toFixed(0)}% das amostras e proporções da palma inconsistentes em ${(prediction.depth.palmIncoherenceFraction * 100).toFixed(0)}%. Esses avisos não bloqueiam o cadastro; a execução será comparada aos exemplos pelo DTW.`;
 }
 const mock = new StaticClassifierMock();
 const engine = new GameEngine({
@@ -287,16 +307,21 @@ function renderReference() {
   const temporal = dynamic || label === 'UNKNOWN';
   const busy = Boolean(vision.calibration);
   $('reference-title').textContent = label === 'UNKNOWN' ? 'Movimento de rejeição' : `Referência · ${label}`;
-  $('training-method').textContent = temporal ? 'Sinal com movimento · execute a trajetória completa.' : 'Sinal estático · mantenha a posição dos dedos.';
+  $('training-method').textContent = label === 'X' ? 'Mantenha os dedos e a orientação da palma; afaste a mão da câmera e pare na posição final.' : temporal ? 'Sinal com movimento · execute a trajetória completa.' : 'Sinal estático · mantenha a posição dos dedos.';
   $('save-example').disabled = busy || !vision.ready;
   $('save-example').textContent = temporal ? 'Gravar um movimento' : 'Salvar exemplos deste sinal';
   $('motion-tools').hidden = !temporal;
   $('motion-guide').hidden = !temporal;
   $('personal-count').textContent = temporal ? `${profile?.motionExamples?.[label]?.length ?? 0} de 8 movimentos salvos para ${label === 'UNKNOWN' ? 'rejeição' : label}. Recomendamos de 3 a 5 execuções.` : `${profile?.signExamples?.[label]?.length ?? 0} exemplos pessoais de ${label} salvos.`;
+  if (label === 'X') {
+    const usable = vision.dynamic.classifier.examples.X.length;
+    const saved = profile?.motionExamples?.X?.length ?? 0;
+    $('personal-count').textContent = `${usable} exemplos de X disponíveis para reconhecimento. Grave de 3 a 5 recuos completos.${saved > usable ? ` ${saved - usable} exemplos anteriores estão preservados, mas precisam ser regravados com a leitura de profundidade.` : ''}`;
+  }
   if (label === 'UNKNOWN') $('reference-caption').textContent = 'Grave movimentos parecidos, mas incorretos (ex.: trajetória incompleta ou invertida), para ajudar o sistema a rejeitá-los.';
   $('remove-motion').disabled = busy || !profile?.motionExamples?.[label]?.length;
   $('import-motion').disabled = busy;
-  $('export-motion').disabled = busy || !Object.values(vision.dynamic.classifier.examples).some(clips => clips.length);
+  $('export-motion').disabled = busy || !Object.values(profile?.motionExamples ?? {}).some(clips => Array.isArray(clips) && clips.some(validMotionClip));
 }
 function finishCalibration() {
   vision.cancelCalibration();
@@ -363,9 +388,11 @@ $('remove-motion').addEventListener('click', () => {
 });
 $('export-motion').addEventListener('click', () => {
   if (screen !== 'training' || vision.calibration) return;
-  const blob = new Blob([JSON.stringify({ version: MOTION_VERSION, examples: vision.dynamic.classifier.examples })], { type: 'application/json' });
+  // Preserve valid legacy X clips in backups even though inference needs new captures.
+  const examples = Object.fromEntries(Object.entries(profile.motionExamples ?? {}).filter(([label]) => DYNAMIC_CLASSES.has(label) || label === 'UNKNOWN').map(([label, clips]) => [label, Array.isArray(clips) ? clips.filter(validMotionClip).slice(-8) : []]));
+  const blob = new Blob([JSON.stringify({ version: MOTION_VERSION, examples })], { type: 'application/json' });
   const url = URL.createObjectURL(blob), anchor = document.createElement('a');
-  anchor.href = url; anchor.download = 'libras-movimentos-v1.json'; anchor.click();
+  anchor.href = url; anchor.download = `libras-movimentos-v${MOTION_VERSION}.json`; anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 $('import-motion').addEventListener('change', async event => {

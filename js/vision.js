@@ -101,7 +101,7 @@ export class VisionController {
     const handedness = rawLabel === 'Left' ? 'Right' : rawLabel === 'Right' ? 'Left' : null;
     if (this.calibration) {
       const status = this.calibration.observe(hand, time, aspectRatio, handedness);
-      if (['complete', 'timeout'].includes(status.state)) this.calibration = null;
+      if (['complete', 'timeout', 'depth-required'].includes(status.state)) this.calibration = null;
       this.onCalibration(status);
       return;
     }

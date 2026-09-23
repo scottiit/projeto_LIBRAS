@@ -1,7 +1,8 @@
 import { isValidHand, DYNAMIC_CLASSES } from './trajectory.js';
 import { normalizeHand, featureDistance } from './classifier.js';
+import { apparentPalmSize, coherentPalmScale, depthRetreat, DEPTH_WEIGHT, DEPTH_AXIS } from './depth.js';
 
-export const MOTION_VERSION = 1;
+export const MOTION_VERSION = 2;
 export const MOTION_LABELS = [...DYNAMIC_CLASSES, 'UNKNOWN'];
 export const MOTION_LIMIT = 8;
 const MOTION_SAMPLES = 32;
@@ -23,22 +24,33 @@ function motionFrame(hand, time, handedness, aspectRatio) {
   const direction = handedness === 'Left' ? 1 : -1;
   for (let i = 0; i < 63; i += 3) pose[i] *= direction;
   const palm = [5, 9, 13, 17].reduce((sum, index) => sum + Math.hypot((hand[index].x - hand[0].x) * aspectRatio, hand[index].y - hand[0].y, (hand[index].z - hand[0].z) * aspectRatio), 0) / 4;
-  return { time, handedness, aspectRatio, pose, palm, wrist: [direction * hand[0].x * aspectRatio, hand[0].y] };
+  const apparentSize = apparentPalmSize(hand, aspectRatio);
+  if (!apparentSize) return null;
+  return { time, handedness, aspectRatio, pose, palm, apparentSize, wrist: [direction * hand[0].x * aspectRatio, hand[0].y] };
+}
+function scaleMotion(a, b) {
+  // Depth depends on the palm, not on perfectly still fingertips. Pose changes
+  // remain represented separately by featureDistance and the DTW sequence.
+  return coherentPalmScale(a.pose, b.pose) ? Math.log(a.apparentSize / b.apparentSize) : 0;
 }
 function motionDifference(a, b) {
   const palm = (a.palm + b.palm) / 2;
-  return Math.hypot(featureDistance(a.pose, b.pose), .55 * Math.hypot(a.wrist[0] - b.wrist[0], a.wrist[1] - b.wrist[1]) / palm);
+  return Math.hypot(featureDistance(a.pose, b.pose), .55 * Math.hypot(a.wrist[0] - b.wrist[0], a.wrist[1] - b.wrist[1]) / palm, DEPTH_WEIGHT * scaleMotion(a, b));
 }
-function temporalCost(a, b) {
-  return Math.hypot(featureDistance(a, b), .55 * Math.hypot(a[63] - b[63], a[64] - b[64]));
+function temporalCost(a, b, includeDepth = true) {
+  // Legacy clips contain no scale history: never invent a zero-depth trajectory.
+  const depth = includeDepth && a.length === 66 && b.length === 66 ? DEPTH_WEIGHT * (a[DEPTH_AXIS] - b[DEPTH_AXIS]) : 0;
+  return Math.hypot(featureDistance(a, b), .55 * Math.hypot(a[63] - b[63], a[64] - b[64]), depth);
 }
 
 /** Strict, bounded schema also used for localStorage and untrusted JSON imports. */
 export function validMotionClip(clip) {
-  return Boolean(clip && clip.version === MOTION_VERSION && Number.isFinite(clip.durationMs) && clip.durationMs >= 250 && clip.durationMs <= 4500 &&
-    Array.isArray(clip.frames) && clip.frames.length === MOTION_SAMPLES && clip.frames.every(frame => Array.isArray(frame) && frame.length === 65 && frame.every(value => Number.isFinite(value) && Math.abs(value) <= 20)) &&
-    clip.frames[0][63] === 0 && clip.frames[0][64] === 0 && motionExtent(clip) >= .16);
+  return Boolean(clip && [1, MOTION_VERSION].includes(clip.version) && Number.isFinite(clip.durationMs) && clip.durationMs >= 250 && clip.durationMs <= 4500 &&
+    Array.isArray(clip.frames) && clip.frames.length === MOTION_SAMPLES && clip.frames.every(frame => Array.isArray(frame) && frame.length === (clip.version === 1 ? 65 : 66) && frame.every(value => Number.isFinite(value) && Math.abs(value) <= 20)) &&
+    clip.frames[0][63] === 0 && clip.frames[0][64] === 0 && (clip.version === 1 || clip.frames[0][DEPTH_AXIS] === 0) && (motionExtent(clip) >= .16 || (clip.version === 2 && inspectDepthRetreat(clip).eligible)));
 }
+export const inspectDepthRetreat = clip => depthRetreat(clip, featureDistance);
+export const usableMotionClip = (label, clip) => validMotionClip(clip) && (label !== 'X' || inspectDepthRetreat(clip).eligible);
 function motionExtent(clip) {
   return Math.max(...clip.frames.map(frame => temporalCost(frame, clip.frames[0])));
 }
@@ -50,7 +62,7 @@ function motionExtent(clip) {
 function encodeMotion(frames) {
   const first = frames[0], last = frames.at(-1);
   const durationMs = last.time - first.time;
-  const values = frames.map(frame => [...frame.pose, (frame.wrist[0] - first.wrist[0]) / first.palm, (frame.wrist[1] - first.wrist[1]) / first.palm]);
+  const values = frames.map(frame => [...frame.pose, (frame.wrist[0] - first.wrist[0]) / first.palm, (frame.wrist[1] - first.wrist[1]) / first.palm, Math.log(first.apparentSize / frame.apparentSize)]);
   let cursor = 0;
   const sampled = Array.from({ length: MOTION_SAMPLES }, (_, i) => {
     const time = first.time + durationMs * i / (MOTION_SAMPLES - 1);
@@ -69,7 +81,7 @@ function encodeMotion(frames) {
  * O(N) memory; this is NOT FastDTW, neural inference or a calibrated probability.
  * Uniform resampling removes global speed; warping handles local speed changes.
  */
-export function motionDtw(left, right) {
+export function motionDtw(left, right, includeDepth = true) {
   if (!validMotionClip(left) || !validMotionClip(right)) return Infinity;
   const a = left.frames, b = right.frames, band = Math.ceil(Math.max(a.length, b.length) * .25);
   let previous = new Float64Array(b.length + 1).fill(Infinity), lengths = new Uint16Array(b.length + 1);
@@ -80,7 +92,7 @@ export function motionDtw(left, right) {
       let best = previous[j - 1], count = lengths[j - 1];
       if (previous[j] < best) { best = previous[j]; count = lengths[j]; }
       if (row[j - 1] < best) { best = row[j - 1]; count = counts[j - 1]; }
-      row[j] = best + temporalCost(a[i - 1], b[j - 1]); counts[j] = count + 1;
+      row[j] = best + temporalCost(a[i - 1], b[j - 1], includeDepth); counts[j] = count + 1;
     }
     previous = row; lengths = counts;
   }
@@ -95,28 +107,33 @@ export function motionDtw(left, right) {
 export class MotionClassifier {
   constructor(examples) { this.setExamples(examples); }
   setExamples(examples = {}) {
-    this.examples = Object.fromEntries(MOTION_LABELS.map(label => [label, (Array.isArray(examples?.[label]) ? examples[label] : []).filter(validMotionClip).slice(-MOTION_LIMIT)]));
+    this.examples = Object.fromEntries(MOTION_LABELS.map(label => [label, (Array.isArray(examples?.[label]) ? examples[label] : []).filter(clip => usableMotionClip(label, clip)).slice(-MOTION_LIMIT)]));
   }
   hasClass(label) { return Boolean(this.examples[label]?.length); }
   predict(clip) {
     const result = { targetClass: null, confidenceProbability: 0, timestamp: Date.now(), source: 'dtw', alternatives: [], reason: 'invalid' };
     if (!validMotionClip(clip)) return result;
+    const depth = inspectDepthRetreat(clip);
     const alternatives = MOTION_LABELS.filter(label => this.hasClass(label)).map(label => {
+      // Preserve the validated pose/XY metric for H/J/K/Z. X and new rejection
+      // examples also compare retreat; old non-X examples remain usable as-is.
+      const includeDepth = label === 'X' || label === 'UNKNOWN';
       const distances = this.examples[label].map(example => {
-        const dtw = motionDtw(clip, example);
+        const dtw = motionDtw(clip, example, includeDepth);
         // Do not let time warping hide the wrong initial/final pose or an incomplete path.
-        const endpoints = (temporalCost(clip.frames[0], example.frames[0]) + temporalCost(clip.frames.at(-1), example.frames.at(-1))) / 2;
+        const endpoints = (temporalCost(clip.frames[0], example.frames[0], includeDepth) + temporalCost(clip.frames.at(-1), example.frames.at(-1), includeDepth)) / 2;
         return Math.max(dtw, endpoints * .6);
       });
       return { label, distance: Math.min(...distances) };
     }).sort((a, b) => a.distance - b.distance);
-    if (!alternatives.length) return { ...result, reason: 'no-examples' };
+    if (!alternatives.length) return { ...result, depth, reason: 'no-examples' };
     const [best, second] = alternatives;
     const similarity = Math.exp(-.5 * (best.distance / .22) ** 2);
     const separation = second ? motionClamp((second.distance - best.distance) / .12) : 1;
     const score = Math.min(similarity, .5 + .5 * separation);
-    const accepted = best.label !== 'UNKNOWN' && score > .85;
-    return { ...result, targetClass: accepted ? best.label : null, confidenceProbability: accepted ? score : 0, similarityScore: score, alternatives, reason: accepted ? 'matched' : best.label === 'UNKNOWN' ? 'negative' : 'uncertain' };
+    const needsDepth = best.label === 'X' && !depth.eligible;
+    const accepted = best.label !== 'UNKNOWN' && !needsDepth && score > .85;
+    return { ...result, targetClass: accepted ? best.label : null, confidenceProbability: accepted ? score : 0, similarityScore: score, alternatives, depth, reason: accepted ? 'matched' : best.label === 'UNKNOWN' ? 'negative' : needsDepth ? 'depth-required' : 'uncertain' };
   }
 }
 
@@ -131,7 +148,9 @@ export class MotionSegmenter {
   observe(hand, time, handedness, aspectRatio = 1) {
     const frame = motionFrame(hand, time, handedness, aspectRatio);
     if (!frame) { this.reset(); return { state: 'tracking-lost' }; }
-    const broken = this.last && (time <= this.last.time || time - this.last.time > MOTION_GAP || handedness !== this.last.handedness || aspectRatio !== this.last.aspectRatio || motionDifference(this.last, frame) > 2);
+    // Reject a sudden >~11% size change between observations. Otherwise linear
+    // resampling could turn ONE tracker/zoom jump into many smooth fake samples.
+    const broken = this.last && (time <= this.last.time || time - this.last.time > MOTION_GAP || handedness !== this.last.handedness || aspectRatio !== this.last.aspectRatio || motionDifference(this.last, frame) > 2 || Math.abs(scaleMotion(this.last, frame)) > .12);
     if (broken) { this.reset(); return { state: 'tracking-lost' }; }
     this.last = frame;
     if (!this.anchor) this.anchor = frame;
@@ -144,11 +163,13 @@ export class MotionSegmenter {
     if (this.state === 'ready') {
       this.preRoll.push(frame);
       this.preRoll = this.preRoll.filter(item => time - item.time <= 160).slice(-12);
-      if (motionDifference(this.anchor, frame) <= .12) return { state: 'ready' };
+      // Detect small coherent scale changes early so pre-roll retains the start
+      // of a retreat whose normalized pose and wrist XY may remain identical.
+      if (motionDifference(this.anchor, frame) <= .12 && Math.abs(scaleMotion(this.anchor, frame)) <= .055) return { state: 'ready' };
       this.frames = [...this.preRoll]; this.state = 'recording'; this.anchor = frame; this.stillSince = time;
     } else if (time - this.frames.at(-1).time >= 30) this.frames.push(frame);
     if (time - this.frames[0].time > 4500 || this.frames.length >= 160) { this.reset(); return { state: 'too-long' }; }
-    if (motionDifference(this.anchor, frame) > .07) { this.anchor = frame; this.stillSince = time; }
+    if (motionDifference(this.anchor, frame) > .07 || Math.abs(scaleMotion(this.anchor, frame)) > .025) { this.anchor = frame; this.stillSince = time; }
     if (time - this.stillSince < 300) return { state: 'recording', durationMs: time - this.frames[0].time };
     // Keep only 100 ms of the final pause: its length is not part of the sign.
     const trimmed = this.frames.filter(item => item.time <= this.stillSince + 100);
@@ -167,6 +188,11 @@ export class MotionCapture {
     if (time - this.startedAt > 15000) return { state: 'timeout', dynamic: true };
     if (time - this.startedAt < 2000) return { state: 'warmup', remaining: Math.ceil((2000 - time + this.startedAt) / 1000), dynamic: true };
     const status = this.segmenter.observe(hand, time, handedness, aspectRatio);
+    if (status.state === 'complete' && this.label === 'X') {
+      const depth = inspectDepthRetreat(status.clip);
+      if (!depth.eligible) return { state: 'depth-required', dynamic: true, label: this.label, depth };
+      return { ...status, dynamic: true, label: this.label, depth };
+    }
     return { ...status, dynamic: true, label: this.label };
   }
 }

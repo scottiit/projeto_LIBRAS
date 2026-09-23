@@ -419,8 +419,107 @@ class CalibrationSession {
   }
 }
 
+// Use only the wrist and MCP joints: fingertip motion must not look like depth.
+const PALM_SPANS = [[0, 5], [0, 9], [0, 13], [0, 17], [5, 17], [5, 13], [9, 17]];
+const DEPTH_WEIGHT = 1.2;
+const DEPTH_AXIS = 65;
+const MIN_RETREAT = .1;
+const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
 
-const MOTION_VERSION = 1;
+function projectedSpans(pose) {
+  return PALM_SPANS.map(([a, b]) => Math.hypot(pose[a * 3] - pose[b * 3], pose[a * 3 + 1] - pose[b * 3 + 1]));
+}
+function palmNormal(pose) {
+  const a = [0, 1, 2].map(axis => pose[5 * 3 + axis] - pose[axis]);
+  const b = [0, 1, 2].map(axis => pose[17 * 3 + axis] - pose[axis]);
+  const cross = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const length = Math.hypot(...cross), denominator = Math.hypot(...a) * Math.hypot(...b);
+  // Nearly collinear bases make orientation unreliable; do not invent an angle.
+  return denominator > 1e-6 && length / denominator > .12 ? cross.map(value => value / length) : null;
+}
+
+/** Apparent palm size, in image-height units, BEFORE per-frame normalization.
+ * RMS of seven projected bone spans; x is corrected for aspect ratio.
+ * No absolute depth is available from MediaPipe's wrist-relative z coordinates.
+ * Pinhole approximation with fixed focal length and unchanged orientation:
+ *   s(t) ~ f * L / Z(t), Z(t)/Z(0) ~ s(0)/s(t).
+ * We store log(s(0)/s(t)): positive = retreat, negative = approach, unitless.
+ * Palm spans avoid the bounding-box changes caused by flexing a fingertip.
+ * RMS stays defined when some joints overlap during H. Such frames can still
+ * describe rotation; coherentPalmScale reports uncertainty in scale evidence.
+ */
+function apparentPalmSize(hand, aspectRatio) {
+  const spans = projectedSpans(hand.flatMap(point => [point.x * aspectRatio, point.y, 0]));
+  if (spans.some(value => !Number.isFinite(value))) return null;
+  const size = Math.sqrt(spans.reduce((sum, value) => sum + value * value, 0) / spans.length);
+  return size > .001 ? size : null;
+}
+
+/** Uniform contraction changes all spans by the same ratio. Rotation generally
+ * contracts different spans differently (foreshortening). Remove the median
+ * log ratio and require a majority of consistent spans. One noisy joint must
+ * not veto an entire motion. Sequence-level inconsistency is a quality warning;
+ * pose/orientation identity is learned from the user's templates by DTW.
+ * This is a plausibility check, not recovery of true 3D motion: zoom and camera
+ * translation can still produce exactly the same monocular observation.
+ */
+function coherentPalmScale(firstPose, currentPose) {
+  const initial = projectedSpans(firstPose), current = projectedSpans(currentPose);
+  const ratios = initial.flatMap((value, index) => value >= .001 && current[index] >= .001 ? [Math.log(current[index] / value)] : []);
+  if (ratios.length < 5 || !ratios.every(Number.isFinite)) return false;
+  const center = median(ratios);
+  return ratios.filter(value => Math.abs(value - center) <= .12).length >= Math.ceil(ratios.length * .7);
+}
+
+/** Validate depth evidence for X, independently of the exact finger pose.
+ * Requires >=~9.5% apparent shrink and progressive retreat over multiple samples.
+ * Finger/modest orientation variation produces warnings, not a training veto:
+ * DTW compares those changes with personal templates during recognition.
+ * Median endpoint windows and a 3-sample median tolerate isolated noisy frames.
+ * Broad sustained palm rotation, raw jumps, approach and instability still fail.
+ * Thresholds are engineering defaults, not calibrated recognition accuracy.
+ * featureDistance is supplied so this module does not depend on the classifier.
+ */
+function depthRetreat(clip, featureDistance) {
+  if (clip?.version !== 2 || !Array.isArray(clip.frames) || clip.frames.length !== 32 || clip.frames.some(frame => !Array.isArray(frame) || frame.length !== 66 || !frame.every(Number.isFinite))) return { eligible: false, reason: 'missing-depth' };
+  const first = clip.frames[0].map((_, axis) => median(clip.frames.slice(0, 3).map(frame => frame[axis])));
+  const raw = clip.frames.map(frame => frame[DEPTH_AXIS]);
+  const net = median(raw.slice(-3)) - median(raw.slice(0, 3));
+  const poseDistances = clip.frames.map(frame => featureDistance(first, frame));
+  const poseVariationFraction = poseDistances.filter(value => value > .14).length / clip.frames.length;
+  const palmIncoherenceFraction = clip.frames.filter(frame => !coherentPalmScale(first, frame)).length / clip.frames.length;
+  const warnings = [];
+  if (poseVariationFraction > .2) warnings.push('pose-variation');
+  if (palmIncoherenceFraction > .2) warnings.push('palm-variation');
+  const initialNormal = palmNormal(first);
+  const angles = clip.frames.map(frame => {
+    const normal = palmNormal(frame);
+    return initialNormal && normal ? Math.acos(Math.max(-1, Math.min(1, initialNormal.reduce((sum, value, axis) => sum + value * normal[axis], 0)))) * 180 / Math.PI : null;
+  });
+  const endAngles = angles.slice(-3).filter(Number.isFinite);
+  const palmRotationDegrees = endAngles.length >= 2 ? median(endAngles) : null;
+  const result = { eligible: false, reason: 'insufficient-retreat', scaleRatio: Math.exp(-net), relativeDistanceRatio: Math.exp(net), minShrinkPercent: (1 - Math.exp(-MIN_RETREAT)) * 100, poseVariationFraction, palmIncoherenceFraction, palmRotationDegrees, warnings };
+  if (net < -.04) return { ...result, reason: 'approach' };
+  if (net < MIN_RETREAT) return result;
+  if (net > 1.2) return { ...result, reason: 'excessive-retreat' };
+  // Broad, sustained wrist rotations remain distinct from a retreat. Unlike the
+  // old any-frame RMS veto, this palm-only check tolerates finger motion, small
+  // tilts and isolated angle outliers. 60 degrees is an initial engineering cap.
+  if (palmRotationDegrees > 60 && angles.filter(angle => angle !== null && angle > 60).length / angles.length > .2) return { ...result, reason: 'palm-rotation' };
+  if (raw.some((value, index) => index > 0 && Math.abs(value - raw[index - 1]) > .1)) return { ...result, reason: 'scale-jump' };
+  const smoothed = raw.map((_, index) => median(raw.slice(Math.max(0, index - 1), Math.min(raw.length, index + 2))));
+  let backward = 0, advancingSamples = 0;
+  for (let index = 1; index < smoothed.length; index++) {
+    const delta = smoothed[index] - smoothed[index - 1];
+    if (delta < 0) backward -= delta;
+    if (delta > .003) advancingSamples++;
+  }
+  if (advancingSamples < 4 || backward > .05 + net * .35) return { ...result, reason: 'unstable-retreat' };
+  return { ...result, eligible: true, reason: 'retreat' };
+}
+
+
+const MOTION_VERSION = 2;
 const MOTION_LABELS = [...DYNAMIC_CLASSES, 'UNKNOWN'];
 const MOTION_LIMIT = 8;
 const MOTION_SAMPLES = 32;
@@ -442,22 +541,33 @@ function motionFrame(hand, time, handedness, aspectRatio) {
   const direction = handedness === 'Left' ? 1 : -1;
   for (let i = 0; i < 63; i += 3) pose[i] *= direction;
   const palm = [5, 9, 13, 17].reduce((sum, index) => sum + Math.hypot((hand[index].x - hand[0].x) * aspectRatio, hand[index].y - hand[0].y, (hand[index].z - hand[0].z) * aspectRatio), 0) / 4;
-  return { time, handedness, aspectRatio, pose, palm, wrist: [direction * hand[0].x * aspectRatio, hand[0].y] };
+  const apparentSize = apparentPalmSize(hand, aspectRatio);
+  if (!apparentSize) return null;
+  return { time, handedness, aspectRatio, pose, palm, apparentSize, wrist: [direction * hand[0].x * aspectRatio, hand[0].y] };
+}
+function scaleMotion(a, b) {
+  // Depth depends on the palm, not on perfectly still fingertips. Pose changes
+  // remain represented separately by featureDistance and the DTW sequence.
+  return coherentPalmScale(a.pose, b.pose) ? Math.log(a.apparentSize / b.apparentSize) : 0;
 }
 function motionDifference(a, b) {
   const palm = (a.palm + b.palm) / 2;
-  return Math.hypot(featureDistance(a.pose, b.pose), .55 * Math.hypot(a.wrist[0] - b.wrist[0], a.wrist[1] - b.wrist[1]) / palm);
+  return Math.hypot(featureDistance(a.pose, b.pose), .55 * Math.hypot(a.wrist[0] - b.wrist[0], a.wrist[1] - b.wrist[1]) / palm, DEPTH_WEIGHT * scaleMotion(a, b));
 }
-function temporalCost(a, b) {
-  return Math.hypot(featureDistance(a, b), .55 * Math.hypot(a[63] - b[63], a[64] - b[64]));
+function temporalCost(a, b, includeDepth = true) {
+  // Legacy clips contain no scale history: never invent a zero-depth trajectory.
+  const depth = includeDepth && a.length === 66 && b.length === 66 ? DEPTH_WEIGHT * (a[DEPTH_AXIS] - b[DEPTH_AXIS]) : 0;
+  return Math.hypot(featureDistance(a, b), .55 * Math.hypot(a[63] - b[63], a[64] - b[64]), depth);
 }
 
 /** Strict, bounded schema also used for localStorage and untrusted JSON imports. */
 function validMotionClip(clip) {
-  return Boolean(clip && clip.version === MOTION_VERSION && Number.isFinite(clip.durationMs) && clip.durationMs >= 250 && clip.durationMs <= 4500 &&
-    Array.isArray(clip.frames) && clip.frames.length === MOTION_SAMPLES && clip.frames.every(frame => Array.isArray(frame) && frame.length === 65 && frame.every(value => Number.isFinite(value) && Math.abs(value) <= 20)) &&
-    clip.frames[0][63] === 0 && clip.frames[0][64] === 0 && motionExtent(clip) >= .16);
+  return Boolean(clip && [1, MOTION_VERSION].includes(clip.version) && Number.isFinite(clip.durationMs) && clip.durationMs >= 250 && clip.durationMs <= 4500 &&
+    Array.isArray(clip.frames) && clip.frames.length === MOTION_SAMPLES && clip.frames.every(frame => Array.isArray(frame) && frame.length === (clip.version === 1 ? 65 : 66) && frame.every(value => Number.isFinite(value) && Math.abs(value) <= 20)) &&
+    clip.frames[0][63] === 0 && clip.frames[0][64] === 0 && (clip.version === 1 || clip.frames[0][DEPTH_AXIS] === 0) && (motionExtent(clip) >= .16 || (clip.version === 2 && inspectDepthRetreat(clip).eligible)));
 }
+const inspectDepthRetreat = clip => depthRetreat(clip, featureDistance);
+const usableMotionClip = (label, clip) => validMotionClip(clip) && (label !== 'X' || inspectDepthRetreat(clip).eligible);
 function motionExtent(clip) {
   return Math.max(...clip.frames.map(frame => temporalCost(frame, clip.frames[0])));
 }
@@ -469,7 +579,7 @@ function motionExtent(clip) {
 function encodeMotion(frames) {
   const first = frames[0], last = frames.at(-1);
   const durationMs = last.time - first.time;
-  const values = frames.map(frame => [...frame.pose, (frame.wrist[0] - first.wrist[0]) / first.palm, (frame.wrist[1] - first.wrist[1]) / first.palm]);
+  const values = frames.map(frame => [...frame.pose, (frame.wrist[0] - first.wrist[0]) / first.palm, (frame.wrist[1] - first.wrist[1]) / first.palm, Math.log(first.apparentSize / frame.apparentSize)]);
   let cursor = 0;
   const sampled = Array.from({ length: MOTION_SAMPLES }, (_, i) => {
     const time = first.time + durationMs * i / (MOTION_SAMPLES - 1);
@@ -488,7 +598,7 @@ function encodeMotion(frames) {
  * O(N) memory; this is NOT FastDTW, neural inference or a calibrated probability.
  * Uniform resampling removes global speed; warping handles local speed changes.
  */
-function motionDtw(left, right) {
+function motionDtw(left, right, includeDepth = true) {
   if (!validMotionClip(left) || !validMotionClip(right)) return Infinity;
   const a = left.frames, b = right.frames, band = Math.ceil(Math.max(a.length, b.length) * .25);
   let previous = new Float64Array(b.length + 1).fill(Infinity), lengths = new Uint16Array(b.length + 1);
@@ -499,7 +609,7 @@ function motionDtw(left, right) {
       let best = previous[j - 1], count = lengths[j - 1];
       if (previous[j] < best) { best = previous[j]; count = lengths[j]; }
       if (row[j - 1] < best) { best = row[j - 1]; count = counts[j - 1]; }
-      row[j] = best + temporalCost(a[i - 1], b[j - 1]); counts[j] = count + 1;
+      row[j] = best + temporalCost(a[i - 1], b[j - 1], includeDepth); counts[j] = count + 1;
     }
     previous = row; lengths = counts;
   }
@@ -514,28 +624,33 @@ function motionDtw(left, right) {
 class MotionClassifier {
   constructor(examples) { this.setExamples(examples); }
   setExamples(examples = {}) {
-    this.examples = Object.fromEntries(MOTION_LABELS.map(label => [label, (Array.isArray(examples?.[label]) ? examples[label] : []).filter(validMotionClip).slice(-MOTION_LIMIT)]));
+    this.examples = Object.fromEntries(MOTION_LABELS.map(label => [label, (Array.isArray(examples?.[label]) ? examples[label] : []).filter(clip => usableMotionClip(label, clip)).slice(-MOTION_LIMIT)]));
   }
   hasClass(label) { return Boolean(this.examples[label]?.length); }
   predict(clip) {
     const result = { targetClass: null, confidenceProbability: 0, timestamp: Date.now(), source: 'dtw', alternatives: [], reason: 'invalid' };
     if (!validMotionClip(clip)) return result;
+    const depth = inspectDepthRetreat(clip);
     const alternatives = MOTION_LABELS.filter(label => this.hasClass(label)).map(label => {
+      // Preserve the validated pose/XY metric for H/J/K/Z. X and new rejection
+      // examples also compare retreat; old non-X examples remain usable as-is.
+      const includeDepth = label === 'X' || label === 'UNKNOWN';
       const distances = this.examples[label].map(example => {
-        const dtw = motionDtw(clip, example);
+        const dtw = motionDtw(clip, example, includeDepth);
         // Do not let time warping hide the wrong initial/final pose or an incomplete path.
-        const endpoints = (temporalCost(clip.frames[0], example.frames[0]) + temporalCost(clip.frames.at(-1), example.frames.at(-1))) / 2;
+        const endpoints = (temporalCost(clip.frames[0], example.frames[0], includeDepth) + temporalCost(clip.frames.at(-1), example.frames.at(-1), includeDepth)) / 2;
         return Math.max(dtw, endpoints * .6);
       });
       return { label, distance: Math.min(...distances) };
     }).sort((a, b) => a.distance - b.distance);
-    if (!alternatives.length) return { ...result, reason: 'no-examples' };
+    if (!alternatives.length) return { ...result, depth, reason: 'no-examples' };
     const [best, second] = alternatives;
     const similarity = Math.exp(-.5 * (best.distance / .22) ** 2);
     const separation = second ? motionClamp((second.distance - best.distance) / .12) : 1;
     const score = Math.min(similarity, .5 + .5 * separation);
-    const accepted = best.label !== 'UNKNOWN' && score > .85;
-    return { ...result, targetClass: accepted ? best.label : null, confidenceProbability: accepted ? score : 0, similarityScore: score, alternatives, reason: accepted ? 'matched' : best.label === 'UNKNOWN' ? 'negative' : 'uncertain' };
+    const needsDepth = best.label === 'X' && !depth.eligible;
+    const accepted = best.label !== 'UNKNOWN' && !needsDepth && score > .85;
+    return { ...result, targetClass: accepted ? best.label : null, confidenceProbability: accepted ? score : 0, similarityScore: score, alternatives, depth, reason: accepted ? 'matched' : best.label === 'UNKNOWN' ? 'negative' : needsDepth ? 'depth-required' : 'uncertain' };
   }
 }
 
@@ -550,7 +665,9 @@ class MotionSegmenter {
   observe(hand, time, handedness, aspectRatio = 1) {
     const frame = motionFrame(hand, time, handedness, aspectRatio);
     if (!frame) { this.reset(); return { state: 'tracking-lost' }; }
-    const broken = this.last && (time <= this.last.time || time - this.last.time > MOTION_GAP || handedness !== this.last.handedness || aspectRatio !== this.last.aspectRatio || motionDifference(this.last, frame) > 2);
+    // Reject a sudden >~11% size change between observations. Otherwise linear
+    // resampling could turn ONE tracker/zoom jump into many smooth fake samples.
+    const broken = this.last && (time <= this.last.time || time - this.last.time > MOTION_GAP || handedness !== this.last.handedness || aspectRatio !== this.last.aspectRatio || motionDifference(this.last, frame) > 2 || Math.abs(scaleMotion(this.last, frame)) > .12);
     if (broken) { this.reset(); return { state: 'tracking-lost' }; }
     this.last = frame;
     if (!this.anchor) this.anchor = frame;
@@ -563,11 +680,13 @@ class MotionSegmenter {
     if (this.state === 'ready') {
       this.preRoll.push(frame);
       this.preRoll = this.preRoll.filter(item => time - item.time <= 160).slice(-12);
-      if (motionDifference(this.anchor, frame) <= .12) return { state: 'ready' };
+      // Detect small coherent scale changes early so pre-roll retains the start
+      // of a retreat whose normalized pose and wrist XY may remain identical.
+      if (motionDifference(this.anchor, frame) <= .12 && Math.abs(scaleMotion(this.anchor, frame)) <= .055) return { state: 'ready' };
       this.frames = [...this.preRoll]; this.state = 'recording'; this.anchor = frame; this.stillSince = time;
     } else if (time - this.frames.at(-1).time >= 30) this.frames.push(frame);
     if (time - this.frames[0].time > 4500 || this.frames.length >= 160) { this.reset(); return { state: 'too-long' }; }
-    if (motionDifference(this.anchor, frame) > .07) { this.anchor = frame; this.stillSince = time; }
+    if (motionDifference(this.anchor, frame) > .07 || Math.abs(scaleMotion(this.anchor, frame)) > .025) { this.anchor = frame; this.stillSince = time; }
     if (time - this.stillSince < 300) return { state: 'recording', durationMs: time - this.frames[0].time };
     // Keep only 100 ms of the final pause: its length is not part of the sign.
     const trimmed = this.frames.filter(item => item.time <= this.stillSince + 100);
@@ -586,6 +705,11 @@ class MotionCapture {
     if (time - this.startedAt > 15000) return { state: 'timeout', dynamic: true };
     if (time - this.startedAt < 2000) return { state: 'warmup', remaining: Math.ceil((2000 - time + this.startedAt) / 1000), dynamic: true };
     const status = this.segmenter.observe(hand, time, handedness, aspectRatio);
+    if (status.state === 'complete' && this.label === 'X') {
+      const depth = inspectDepthRetreat(status.clip);
+      if (!depth.eligible) return { state: 'depth-required', dynamic: true, label: this.label, depth };
+      return { ...status, dynamic: true, label: this.label, depth };
+    }
     return { ...status, dynamic: true, label: this.label };
   }
 }
@@ -699,14 +823,14 @@ class ProfileStore {
     return this.importMotion(name, { version: MOTION_VERSION, examples: { [label]: [clip] } });
   }
   importMotion(name, payload) {
-    if (payload?.version !== MOTION_VERSION || !isRecord(payload.examples) || !Object.keys(payload.examples).length || Object.keys(payload.examples).some(label => !MOTION_LABELS.includes(label)) ||
-      Object.values(payload.examples).some(clips => !Array.isArray(clips) || clips.length > MOTION_LIMIT || !clips.every(validMotionClip))) throw new Error('Arquivo de movimentos inválido ou de versão incompatível.');
+    if (![1, MOTION_VERSION].includes(payload?.version) || !isRecord(payload.examples) || !Object.keys(payload.examples).length || Object.keys(payload.examples).some(label => !MOTION_LABELS.includes(label)) ||
+      Object.values(payload.examples).some(clips => !Array.isArray(clips) || clips.length > MOTION_LIMIT || !clips.every(clip => validMotionClip(clip) && clip.version <= payload.version))) throw new Error('Arquivo de movimentos inválido ou de versão incompatível.');
     const profile = this.read(name);
     if (!profile) throw new Error('Perfil não encontrado.');
     const examples = {};
     for (const label of MOTION_LABELS) {
       const previous = Array.isArray(profile.motionExamples?.[label]) ? profile.motionExamples[label].filter(validMotionClip) : [];
-      examples[label] = [...previous, ...(payload.examples[label] ?? [])].slice(-MOTION_LIMIT).map(clip => ({ version: MOTION_VERSION, durationMs: clip.durationMs, frames: clip.frames.map(frame => [...frame]) }));
+      examples[label] = [...previous, ...(payload.examples[label] ?? [])].slice(-MOTION_LIMIT).map(clip => ({ version: clip.version, durationMs: clip.durationMs, frames: clip.frames.map(frame => [...frame]) }));
     }
     profile.motionExamples = examples;
     this.write(profile); // One write: quota failure cannot leave a partial import.
@@ -822,7 +946,7 @@ class VisionController {
     const handedness = rawLabel === 'Left' ? 'Right' : rawLabel === 'Right' ? 'Left' : null;
     if (this.calibration) {
       const status = this.calibration.observe(hand, time, aspectRatio, handedness);
-      if (['complete', 'timeout'].includes(status.state)) this.calibration = null;
+      if (['complete', 'timeout', 'depth-required'].includes(status.state)) this.calibration = null;
       this.onCalibration(status);
       return;
     }
@@ -935,6 +1059,7 @@ const vision = new VisionController($('camera'), $('overlay'), (prediction, capt
         profile = store.saveMotion(profile.name, status.label, status.clip);
         vision.setMotionExamples(profile.motionExamples);
         $('calibration-status').textContent = `Movimento de ${status.label === 'UNKNOWN' ? 'rejeição' : status.label} salvo (${(status.clip.durationMs / 1000).toFixed(1)} s). Repita para testar; grave de 3 a 5 execuções variadas.`;
+        if (status.depth?.warnings?.length) $('calibration-status').textContent += ' A variação dos dedos ou da palma foi preservada no exemplo. Confira a execução com a referência.';
       } else {
         profile = store.saveExamples(profile.name, status.label, status.samples);
         vision.setPersonalExamples(profile.signExamples);
@@ -942,12 +1067,26 @@ const vision = new VisionController($('camera'), $('overlay'), (prediction, capt
       }
     } catch (error) { report(new Error(`Os exemplos não foram salvos: ${error.message}`)); }
     finishCalibration();
-  } else if (status.state === 'timeout') {
-    $('calibration-status').textContent = 'Captura encerrada. Tente novamente com a mão inteira no enquadramento, pausando antes e depois do movimento.';
+  } else if (status.state === 'timeout' || status.state === 'depth-required') {
+    $('calibration-status').textContent = status.state === 'depth-required' ? `X não salvo: ${depthMessage(status.depth)} Clique em Gravar para tentar novamente.` : 'Captura encerrada. Tente novamente com a mão inteira no enquadramento, pausando antes e depois do movimento.';
+    if (status.depth) renderMotionDiagnostics({ reason: 'depth-required', depth: status.depth, alternatives: [] });
     finishCalibration();
   } else $('calibration-status').textContent = status.state === 'warmup' ? `Prepare o sinal. A captura começa em ${status.remaining}…` : status.dynamic ? motionMessage(status) : status.state === 'tracking-lost' ? 'Mão não detectada. A captura recomeçará ao enquadrá-la.' : `Mantenha a pose estável… ${Math.round(status.progress * 100)}%`;
   if (status.dynamic) $('confidence').textContent = status.state === 'complete' ? 'Captura concluída. Consulte o resultado no Treinamento.' : $('calibration-status').textContent;
 });
+function depthMessage(depth) {
+  const reduction = Number.isFinite(depth?.scaleRatio) ? ((1 - depth.scaleRatio) * 100).toFixed(1) : null;
+  const messages = {
+    'insufficient-retreat': `recuo pequeno: redução aparente de ${reduction ?? '—'}%; mínimo inicial de ${(depth?.minShrinkPercent ?? 9.5).toFixed(1)}%. Afaste um pouco mais a mão.`,
+    approach: 'a palma aumentou de tamanho, indicando aproximação. Faça o movimento de afastamento.',
+    'excessive-retreat': 'a mudança de tamanho foi excessiva. Faça um recuo menor, mantendo a mão no enquadramento.',
+    'palm-rotation': `houve um giro amplo da palma (aproximadamente ${Math.round(depth?.palmRotationDegrees ?? 0)}°), em vez de apenas recuo. Tente afastar com menos giro.`,
+    'scale-jump': 'o rastreamento apresentou um salto brusco de tamanho. Recomece com um movimento suave.',
+    'unstable-retreat': 'o tamanho da palma oscilou demais. Faça um recuo contínuo e pare antes de voltar.',
+    'missing-depth': 'este exemplo não contém a leitura de recuo. Grave um novo movimento.',
+  };
+  return messages[depth?.reason] ?? 'não foi possível confirmar o recuo. Afaste a mão e pare na posição final.';
+}
 function motionMessage(status) {
   if (status.state === 'confirming') return `Movimento: ${status.targetClass} · semelhança ${(status.confidenceProbability * 100).toFixed(1)}% · mantenha a pose final`;
   const messages = {
@@ -956,8 +1095,9 @@ function motionMessage(status) {
     'tracking-lost': 'Rastreamento interrompido. Recomece pela posição inicial.',
     'too-long': 'Movimento longo demais. Recomece e conclua em até 4,5 segundos.',
     'too-short': 'Movimento curto demais. Recomece com a trajetória completa.',
+    'depth-required': depthMessage(status.depth),
     restart: 'Prepare a posição inicial e repita o movimento.',
-    rejected: status.reason === 'no-examples' ? 'Grave movimentos de H, J, K, X e Z no Treinamento.' : status.reason === 'negative' ? 'Movimento semelhante a um exemplo de rejeição. Tente novamente.' : 'Movimento incerto. Confira a referência e repita a trajetória completa.',
+    rejected: status.reason === 'no-examples' ? 'Grave movimentos de H, J, K, X e Z no Treinamento.' : status.reason === 'depth-required' ? depthMessage(status.depth) : status.reason === 'negative' ? 'Movimento semelhante a um exemplo de rejeição. Tente novamente.' : 'Movimento incerto. Confira a referência e repita a trajetória completa.',
   };
   return messages[status.state] ?? 'Aguardando movimento.';
 }
@@ -966,6 +1106,7 @@ function showMotionState(status) {
   const capturing = screen === 'training' && Boolean(vision.calibration);
   document.body.dataset.capturing = String(capturing);
   const labels = { 'camera-off': 'CÂMERA DESLIGADA', warmup: `PREPARE-SE · ${status.remaining ?? 2}`, collecting: 'CAPTURANDO POSE', arming: 'POSIÇÃO INICIAL', ready: 'PRONTO · MOVA', recording: capturing ? 'GRAVANDO EXEMPLO' : 'LENDO MOVIMENTO', confirming: 'RECONHECIDO', rejected: 'NÃO RECONHECIDO', complete: 'CAPTURA CONCLUÍDA', 'tracking-lost': 'MÃO NÃO VISÍVEL', 'too-short': 'MOVIMENTO CURTO', 'too-long': 'MOVIMENTO LONGO', restart: 'RECOMECE' };
+  labels['depth-required'] = 'REFAÇA O RECUO';
   const active = screen === 'training' || (screen === 'game' && DYNAMIC_CLASSES.has(vision.target));
   $('motion-indicator').hidden = !active;
   $('motion-cue').hidden = !active || state === 'camera-off';
@@ -998,7 +1139,10 @@ function renderMotionDiagnostics(prediction) {
     }
     $('motion-distances').append(row);
   }
-  $('motion-diagnostic-status').textContent = prediction.reason === 'no-examples' ? 'Ainda não há exemplos para comparação.' : `Última sequência: ${prediction.targetClass ?? 'não reconhecida'} · escore ${((prediction.similarityScore ?? 0) * 100).toFixed(1)}%. Menor distância indica maior semelhança. Capturas são comparadas antes de serem adicionadas à base.`;
+  $('motion-diagnostic-status').textContent = prediction.reason === 'depth-required' && prediction.source !== 'dtw' ? 'Captura de X recusada pela análise do recuo.' : prediction.reason === 'no-examples' ? 'Ainda não há exemplos para comparação.' : `Última sequência: ${prediction.targetClass ?? 'não reconhecida'} · escore ${((prediction.similarityScore ?? 0) * 100).toFixed(1)}%. Menor distância indica maior semelhança. Capturas são comparadas antes de serem adicionadas à base.`;
+  if (Number.isFinite(prediction.depth?.scaleRatio)) $('motion-diagnostic-status').textContent += ` Variação aparente da palma: ${((prediction.depth.scaleRatio - 1) * 100).toFixed(0)}% · recuo ${prediction.depth.eligible ? 'compatível' : 'não confirmado'}.`;
+  if (prediction.reason === 'depth-required') $('motion-diagnostic-status').textContent += ` Motivo: ${depthMessage(prediction.depth)}`;
+  if (prediction.depth?.warnings?.length) $('motion-diagnostic-status').textContent += ` Aviso de qualidade: variação de pose em ${(prediction.depth.poseVariationFraction * 100).toFixed(0)}% das amostras e proporções da palma inconsistentes em ${(prediction.depth.palmIncoherenceFraction * 100).toFixed(0)}%. Esses avisos não bloqueiam o cadastro; a execução será comparada aos exemplos pelo DTW.`;
 }
 const mock = new StaticClassifierMock();
 const engine = new GameEngine({
@@ -1143,16 +1287,21 @@ function renderReference() {
   const temporal = dynamic || label === 'UNKNOWN';
   const busy = Boolean(vision.calibration);
   $('reference-title').textContent = label === 'UNKNOWN' ? 'Movimento de rejeição' : `Referência · ${label}`;
-  $('training-method').textContent = temporal ? 'Sinal com movimento · execute a trajetória completa.' : 'Sinal estático · mantenha a posição dos dedos.';
+  $('training-method').textContent = label === 'X' ? 'Mantenha os dedos e a orientação da palma; afaste a mão da câmera e pare na posição final.' : temporal ? 'Sinal com movimento · execute a trajetória completa.' : 'Sinal estático · mantenha a posição dos dedos.';
   $('save-example').disabled = busy || !vision.ready;
   $('save-example').textContent = temporal ? 'Gravar um movimento' : 'Salvar exemplos deste sinal';
   $('motion-tools').hidden = !temporal;
   $('motion-guide').hidden = !temporal;
   $('personal-count').textContent = temporal ? `${profile?.motionExamples?.[label]?.length ?? 0} de 8 movimentos salvos para ${label === 'UNKNOWN' ? 'rejeição' : label}. Recomendamos de 3 a 5 execuções.` : `${profile?.signExamples?.[label]?.length ?? 0} exemplos pessoais de ${label} salvos.`;
+  if (label === 'X') {
+    const usable = vision.dynamic.classifier.examples.X.length;
+    const saved = profile?.motionExamples?.X?.length ?? 0;
+    $('personal-count').textContent = `${usable} exemplos de X disponíveis para reconhecimento. Grave de 3 a 5 recuos completos.${saved > usable ? ` ${saved - usable} exemplos anteriores estão preservados, mas precisam ser regravados com a leitura de profundidade.` : ''}`;
+  }
   if (label === 'UNKNOWN') $('reference-caption').textContent = 'Grave movimentos parecidos, mas incorretos (ex.: trajetória incompleta ou invertida), para ajudar o sistema a rejeitá-los.';
   $('remove-motion').disabled = busy || !profile?.motionExamples?.[label]?.length;
   $('import-motion').disabled = busy;
-  $('export-motion').disabled = busy || !Object.values(vision.dynamic.classifier.examples).some(clips => clips.length);
+  $('export-motion').disabled = busy || !Object.values(profile?.motionExamples ?? {}).some(clips => Array.isArray(clips) && clips.some(validMotionClip));
 }
 function finishCalibration() {
   vision.cancelCalibration();
@@ -1219,9 +1368,11 @@ $('remove-motion').addEventListener('click', () => {
 });
 $('export-motion').addEventListener('click', () => {
   if (screen !== 'training' || vision.calibration) return;
-  const blob = new Blob([JSON.stringify({ version: MOTION_VERSION, examples: vision.dynamic.classifier.examples })], { type: 'application/json' });
+  // Preserve valid legacy X clips in backups even though inference needs new captures.
+  const examples = Object.fromEntries(Object.entries(profile.motionExamples ?? {}).filter(([label]) => DYNAMIC_CLASSES.has(label) || label === 'UNKNOWN').map(([label, clips]) => [label, Array.isArray(clips) ? clips.filter(validMotionClip).slice(-8) : []]));
+  const blob = new Blob([JSON.stringify({ version: MOTION_VERSION, examples })], { type: 'application/json' });
   const url = URL.createObjectURL(blob), anchor = document.createElement('a');
-  anchor.href = url; anchor.download = 'libras-movimentos-v1.json'; anchor.click();
+  anchor.href = url; anchor.download = `libras-movimentos-v${MOTION_VERSION}.json`; anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 $('import-motion').addEventListener('change', async event => {

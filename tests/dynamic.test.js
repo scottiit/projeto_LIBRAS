@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MotionSegmenter, MotionClassifier, MotionCapture, TemporalRecognizer, motionDtw, validMotionClip, MOTION_VERSION } from '../js/dynamic.js';
+import { MotionSegmenter, MotionClassifier, MotionCapture, TemporalRecognizer, motionDtw, validMotionClip, inspectDepthRetreat, MOTION_VERSION } from '../js/dynamic.js';
 import { SIGN_EXAMPLES } from '../js/dataset.js';
 import { coordinatesToHand } from '../js/classifier.js';
 import { ProfileStore } from '../js/storage.js';
@@ -15,10 +15,10 @@ const pathPoints = {
   Z: [[0, 0], [.18, 0], [0, .18], [.18, .18]],
   J: [[0, 0], [0, .13], [-.04, .22], [-.15, .16]],
   K: [[0, 0], [0, -.07], [0, -.14], [0, -.22]],
-  X: [[0, 0], [-.08, 0], [-.16, 0], [-.2, -.04]],
+  X: [[0, 0], [0, 0], [0, 0], [0, 0]],
   BAD: [[0, 0], [0, -.1], [.18, -.18], [.2, -.2]],
 };
-function frames(label, { speed = 1, step = 50, scale = 1, mirror = false, aspect = 1, offset = 0, warp = false } = {}) {
+function frames(label, { speed = 1, step = 50, scale = 1, mirror = false, aspect = 1, offset = 0, warp = false, retreat = .3, jitter = 0, tilt = 0, fingerDrift = 0 } = {}) {
   const points = pathPoints[label], output = [];
   const duration = 1000 * speed;
   for (let time = 0; time <= 500 + duration + 500; time += step) {
@@ -29,12 +29,14 @@ function frames(label, { speed = 1, step = 50, scale = 1, mirror = false, aspect
     const y = points[index][1] + fraction * (points[index + 1][1] - points[index][1]);
     // H and K start from the exact same synthetic hand. Rotate H around the
     // wrist's Y axis; translate K upwards. No finger pose changes are invented.
-    const angle = label === 'H' ? u * Math.PI / 2 : 0;
-    const hand = base.map(point => {
+    const angle = label === 'H' ? u * Math.PI / 2 : u * tilt * Math.PI / 180;
+    const projectedScale = (label === 'X' ? 1 - retreat * u : 1) * (1 + jitter * Math.sin(time * .1));
+    const hand = base.map((point, joint) => {
       const dx = point.x - base[0].x, dz = point.z - base[0].z;
       const rotatedX = base[0].x + dx * Math.cos(angle) + dz * Math.sin(angle);
       const rotatedZ = base[0].z - dx * Math.sin(angle) + dz * Math.cos(angle);
-      return { x: (.1 + scale * (rotatedX + x)) * (mirror ? -1 : 1) / aspect, y: .1 + scale * (point.y + y), z: rotatedZ * scale / aspect };
+      const fingerOffset = joint >= 6 && joint <= 8 ? fingerDrift * u : 0;
+      return { x: (.1 + scale * (rotatedX * projectedScale + x)) * (mirror ? -1 : 1) / aspect, y: .1 + scale * ((point.y + fingerOffset) * projectedScale + y), z: rotatedZ * scale * projectedScale / aspect };
     });
     output.push({ hand, time: time + offset, handedness: mirror ? 'Left' : 'Right', aspect });
   }
@@ -54,7 +56,7 @@ test('segmentation encodes bounded shape + anchored trajectory, not a stationary
   const clip = capture('Z');
   assert.ok(validMotionClip(clip));
   assert.equal(clip.frames.length, 32);
-  assert.equal(clip.frames[0].length, 65);
+  assert.equal(clip.frames[0].length, 66);
   assert.equal(clip.frames[0][63], 0);
   assert.ok(Math.abs(clip.frames.at(-1)[63]) > .3);
   assert.equal(motionDtw(clip, clip), 0);
@@ -71,6 +73,161 @@ test('DTW tolerates speed, FPS, handedness, image aspect and scale without erasi
   }
 });
 
+test('X preserves a pure apparent contraction despite identical normalized pose and wrist XY', () => {
+  const clip = capture('X');
+  assert.equal(clip.version, 2);
+  assert.equal(clip.frames[0][65], 0);
+  assert.ok(clip.frames.every(frame => frame[63] === 0 && frame[64] === 0));
+  for (const frame of clip.frames) for (let index = 0; index < 63; index++) assert.ok(Math.abs(frame[index] - clip.frames[0][index]) < 1e-12);
+  const depth = inspectDepthRetreat(clip);
+  assert.equal(depth.eligible, true);
+  assert.ok(depth.scaleRatio > .69 && depth.scaleRatio < .74);
+  assert.ok(Math.abs(depth.relativeDistanceRatio * depth.scaleRatio - 1) < 1e-12);
+  const classifier = new MotionClassifier(samples());
+  for (const options of [{ speed: 2.5 }, { scale: .7, aspect: 9 / 16, mirror: true }, { jitter: .008 }, { retreat: .25 }]) {
+    const prediction = classifier.predict(capture('X', options));
+    assert.equal(prediction.targetClass, 'X', JSON.stringify({ options, prediction }));
+  }
+});
+
+test('rotation, approach, noisy scale and a stationary small hand cannot satisfy the X retreat gate', () => {
+  const classifier = new MotionClassifier({ X: [capture('X')] });
+  for (const clip of [capture('H'), capture('K'), capture('X', { retreat: -.3 })]) {
+    assert.equal(inspectDepthRetreat(clip).eligible, false);
+    assert.equal(classifier.predict(clip).targetClass, null);
+  }
+  // Add shrinking scale to a rotating H; contraction alone must not label it X.
+  const rotation = capture('H');
+  rotation.frames.forEach((frame, index) => { frame[65] = .35 * index / 31; });
+  assert.ok(inspectDepthRetreat(rotation).warnings.includes('pose-variation'));
+  assert.equal(classifier.predict(rotation).targetClass, null);
+  for (const options of [{ retreat: 0, jitter: .015 }, { retreat: .04 }, { retreat: 0, scale: .65 }]) {
+    const recognizer = new TemporalRecognizer({ X: [capture('X')] });
+    for (const frame of frames('X', options)) assert.equal(recognizer.predict(frame.hand, frame.time, frame.handedness, frame.aspect).targetClass, null);
+  }
+  const jump = capture('X');
+  jump.frames.forEach((frame, index) => { frame[65] = index < 16 ? 0 : .35; });
+  assert.equal(inspectDepthRetreat(jump).reason, 'scale-jump');
+  assert.equal(classifier.predict(jump).targetClass, null);
+});
+
+test('X capture rejects a non-retreat example and reuses the production depth segmenter', () => {
+  for (const [label, expectedState] of [['X', 'complete'], ['H', 'depth-required'], ['K', 'depth-required']]) {
+    const recorder = new MotionCapture('X', 0);
+    let result;
+    for (const frame of frames(label, { offset: 2000 })) {
+      result = recorder.observe(frame.hand, frame.time, frame.aspect, frame.handedness);
+      if (['complete', 'depth-required'].includes(result.state)) break;
+    }
+    assert.equal(result.state, expectedState);
+    if (result.clip) assert.equal(inspectDepthRetreat(result.clip).eligible, true);
+    if (label === 'H') assert.equal(result.depth.reason, 'palm-rotation');
+    if (label === 'K') assert.equal(result.depth.reason, 'insufficient-retreat');
+  }
+});
+
+test('personal X capture tolerates finger variation and modest wrist tilt, and remains usable for DTW', () => {
+  const options = { tilt: 20, fingerDrift: .12 };
+  const recorder = new MotionCapture('X', 0);
+  let result;
+  for (const frame of frames('X', { ...options, offset: 2000 })) {
+    result = recorder.observe(frame.hand, frame.time, frame.aspect, frame.handedness);
+    if (['complete', 'depth-required'].includes(result.state)) break;
+  }
+  assert.equal(result.state, 'complete', JSON.stringify(result));
+  assert.equal(result.depth.eligible, true);
+  assert.ok(result.depth.warnings.includes('pose-variation'));
+  const classifier = new MotionClassifier({ ...samples(), X: [result.clip] });
+  assert.equal(classifier.hasClass('X'), true);
+  assert.equal(classifier.predict(capture('X', { ...options, speed: 1.3, step: 40, jitter: .005 })).targetClass, 'X');
+});
+
+test('one noisy pose or palm frame does not veto an otherwise valid X example', () => {
+  const clip = capture('X');
+  // This frame violates both former strict thresholds, but is an isolated outlier.
+  clip.frames[12][8 * 3 + 1] += 1.5;
+  clip.frames[12][17 * 3] += .5;
+  const result = inspectDepthRetreat(clip);
+  assert.equal(result.eligible, true);
+  assert.ok(result.poseVariationFraction > 0 && result.poseVariationFraction < .2);
+  assert.equal(new MotionClassifier({ X: [clip] }).hasClass('X'), true);
+});
+
+test('smaller deliberate retreat is retained and rejection reasons distinguish approach and insufficient scale', () => {
+  const clip = capture('X', { retreat: .15 });
+  assert.ok(validMotionClip(clip));
+  assert.equal(inspectDepthRetreat(clip).eligible, true);
+  assert.equal(new MotionClassifier({ X: [clip] }).predict(capture('X', { retreat: .15, speed: 1.25 })).targetClass, 'X');
+  assert.equal(inspectDepthRetreat(capture('X', { retreat: -.3 })).reason, 'approach');
+  assert.equal(inspectDepthRetreat(capture('K')).reason, 'insufficient-retreat');
+  assert.ok(inspectDepthRetreat(clip).minShrinkPercent > 9 && inspectDepthRetreat(clip).minShrinkPercent < 10);
+});
+
+test('one raw scale discontinuity cannot become a gradual X through resampling', () => {
+  for (const step of [25, 50, 100]) {
+    const recognizer = new TemporalRecognizer({ X: [capture('X')] });
+    let interrupted = false;
+    for (let time = 0; time < 2200; time += step) {
+      const scale = time < 750 ? 1 : .8;
+      const hand = base.map(point => ({ x: .1 + point.x * scale, y: .1 + point.y * scale, z: point.z * scale }));
+      const result = recognizer.predict(hand, time, 'Right');
+      assert.equal(result.targetClass, null);
+      interrupted ||= result.state === 'tracking-lost';
+    }
+    assert.equal(interrupted, true);
+  }
+});
+
+test('X loses all evidence on missing tracking, a scale jump or renewed retreat after matching', () => {
+  const input = frames('X');
+  for (const interruption of ['missing', 'jump']) {
+    const recognizer = new TemporalRecognizer(samples());
+    input.slice(0, 19).forEach(frame => recognizer.predict(frame.hand, frame.time, 'Right'));
+    assert.equal(recognizer.segmenter.state, 'recording');
+    const frame = input[19];
+    const hand = interruption === 'missing' ? null : frame.hand.map(point => ({ x: .1 + (point.x - .1) * .6, y: .1 + (point.y - .1) * .6, z: point.z * .6 }));
+    assert.equal(recognizer.predict(hand, frame.time, 'Right').state, 'tracking-lost');
+    assert.equal(recognizer.segmenter.frames.length, 0);
+  }
+  const recognizer = new TemporalRecognizer(samples());
+  let prediction;
+  input.forEach(frame => { prediction = recognizer.predict(frame.hand, frame.time, 'Right'); });
+  assert.equal(prediction.targetClass, 'X');
+  const terminal = input.at(-1);
+  const continuedRetreat = terminal.hand.map(point => ({ x: .1 + (point.x - .1) * .8, y: .1 + (point.y - .1) * .8, z: point.z * .8 }));
+  assert.equal(recognizer.predict(continuedRetreat, terminal.time + 50, 'Right').targetClass, null);
+  assert.equal(recognizer.evidence, null);
+});
+
+test('legacy H/J/K/Z recordings and scores survive new captures and mixed-version export/import', () => {
+  const toLegacy = clip => ({ ...clip, version: 1, frames: clip.frames.map(frame => frame.slice(0, 65)) });
+  const previous = Object.fromEntries(['H', 'J', 'K', 'Z'].map(label => [label, [toLegacy(capture(label))]]));
+  previous.X = [toLegacy(capture('BAD'))]; // Valid old XY-only X remains backed up.
+  const classifier = new MotionClassifier(previous);
+  assert.equal(classifier.hasClass('X'), false);
+  for (const label of ['H', 'J', 'K', 'Z']) {
+    assert.ok(validMotionClip(previous[label][0]));
+    assert.equal(classifier.predict(capture(label)).targetClass, label);
+  }
+  const memory = new Map(), storage = { getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value) };
+  const store = new ProfileStore(storage);
+  store.login('Ana'); store.login('Bia'); store.saveScore('Ana', 'alphabet', 9999);
+  store.importMotion('Ana', { version: 1, examples: previous });
+  store.saveMotion('Ana', 'X', capture('X'));
+  const profile = store.read('Ana');
+  assert.deepEqual(profile.motionExamples.H, previous.H);
+  assert.equal(profile.motionExamples.X[0].version, 1);
+  assert.equal(profile.motionExamples.X[1].version, 2);
+  assert.equal(profile.bestTimes.alphabet, 9999);
+  store.importMotion('Bia', JSON.parse(JSON.stringify({ version: 2, examples: profile.motionExamples })));
+  assert.deepEqual(store.read('Bia').motionExamples, profile.motionExamples);
+  const restored = new MotionClassifier(store.read('Bia').motionExamples);
+  assert.equal(restored.examples.X.length, 1);
+  assert.equal(restored.predict(capture('X')).targetClass, 'X');
+  assert.throws(() => store.importMotion('Bia', { version: 1, examples: { X: [capture('X')] } }));
+  assert.equal(validMotionClip({ ...previous.H[0], version: 2 }), false);
+});
+
 test('H wrist rotation and K upward motion remain distinct with an identical initial hand', () => {
   const h = capture('H'), k = capture('K');
   assert.deepEqual(frames('H')[0].hand, frames('K')[0].hand);
@@ -84,6 +241,18 @@ test('H wrist rotation and K upward motion remain distinct with an identical ini
   const recognizer = new TemporalRecognizer({ H: [h], K: [k] });
   for (let time = 0; time < 2000; time += 50) assert.equal(recognizer.predict(frames('H')[0].hand, time, 'Right').targetClass, null);
   assert.equal(new MotionCapture('H', 0).label, 'H');
+});
+
+test('overlapping projected palm joints do not discard otherwise valid H tracking', () => {
+  const hand = base.map(point => ({ ...point }));
+  hand[17] = { x: hand[5].x, y: hand[5].y, z: hand[5].z + .04 };
+  const segmenter = new MotionSegmenter();
+  let result;
+  for (let time = 0; time <= 300; time += 50) {
+    result = segmenter.observe(hand, time, 'Right');
+    assert.notEqual(result.state, 'tracking-lost');
+  }
+  assert.equal(result.state, 'ready');
 });
 
 test('a missing frame during H rotation discards the motion and never extrapolates a completion', () => {
@@ -132,7 +301,8 @@ test('finger flexion and relative depth can encode motion with a stationary wris
   }
   assert.equal(result.state, 'complete');
   assert.ok(result.clip.frames.every(frame => frame[63] === 0 && frame[64] === 0));
-  assert.equal(new MotionClassifier({ X: [result.clip], Z: [capture('Z')] }).predict(result.clip).targetClass, 'X');
+  assert.equal(inspectDepthRetreat(result.clip).eligible, false);
+  assert.equal(new MotionClassifier({ X: [result.clip], Z: [capture('Z')] }).hasClass('X'), false, 'finger flexion alone is no longer a valid X template');
 });
 
 test('competing classes, unknown motions, reversed/incomplete paths and ambiguity reject', () => {
@@ -181,12 +351,12 @@ test('guided recorder warms up, then uses the same segmenter; timeout never prod
   assert.throws(() => new MotionCapture('A', 0));
 });
 
-test('dynamic match must survive fresh final-pose frames for a full second; reset requires a new motion', () => {
+for (const label of ['Z', 'X']) test(`${label} match must survive fresh final-pose frames for a full second; reset requires a new motion`, () => {
   const recognizer = new TemporalRecognizer(samples());
   let now = 0;
   const engine = new GameEngine({ clock: () => now, onAdvance: () => recognizer.reset() });
-  engine.start([{ target: 'Z' }, { target: 'Z' }]);
-  const input = frames('Z');
+  engine.start([{ target: label }, { target: label }]);
+  const input = frames(label);
   let terminal, firstMatch;
   for (const f of input) {
     now = f.time;
@@ -231,7 +401,7 @@ test('versioned motion storage is bounded, isolated, atomically validated and ex
   store.importMotion('Bia', JSON.parse(JSON.stringify({ version: MOTION_VERSION, examples: store.read('Ana').motionExamples })));
   assert.equal(store.read('Bia').motionExamples.Z.length, 8);
   const before = memory.get(store.key('Ana'));
-  for (const payload of [{ version: 2, examples: { Z: [clip] } }, { version: 1, examples: { A: [clip] } }, { version: 1, examples: { J: [clip], Z: [null] } }]) assert.throws(() => store.importMotion('Ana', payload));
+  for (const payload of [{ version: 3, examples: { Z: [clip] } }, { version: MOTION_VERSION, examples: { A: [clip] } }, { version: MOTION_VERSION, examples: { J: [clip], Z: [null] } }]) assert.throws(() => store.importMotion('Ana', payload));
   assert.equal(memory.get(store.key('Ana')), before);
   store.removeLastMotion('Ana', 'Z');
   assert.equal(store.read('Ana').motionExamples.Z.length, 7);

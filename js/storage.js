@@ -77,14 +77,14 @@ export class ProfileStore {
     return this.importMotion(name, { version: MOTION_VERSION, examples: { [label]: [clip] } });
   }
   importMotion(name, payload) {
-    if (payload?.version !== MOTION_VERSION || !isRecord(payload.examples) || !Object.keys(payload.examples).length || Object.keys(payload.examples).some(label => !MOTION_LABELS.includes(label)) ||
-      Object.values(payload.examples).some(clips => !Array.isArray(clips) || clips.length > MOTION_LIMIT || !clips.every(validMotionClip))) throw new Error('Arquivo de movimentos inválido ou de versão incompatível.');
+    if (![1, MOTION_VERSION].includes(payload?.version) || !isRecord(payload.examples) || !Object.keys(payload.examples).length || Object.keys(payload.examples).some(label => !MOTION_LABELS.includes(label)) ||
+      Object.values(payload.examples).some(clips => !Array.isArray(clips) || clips.length > MOTION_LIMIT || !clips.every(clip => validMotionClip(clip) && clip.version <= payload.version))) throw new Error('Arquivo de movimentos inválido ou de versão incompatível.');
     const profile = this.read(name);
     if (!profile) throw new Error('Perfil não encontrado.');
     const examples = {};
     for (const label of MOTION_LABELS) {
       const previous = Array.isArray(profile.motionExamples?.[label]) ? profile.motionExamples[label].filter(validMotionClip) : [];
-      examples[label] = [...previous, ...(payload.examples[label] ?? [])].slice(-MOTION_LIMIT).map(clip => ({ version: MOTION_VERSION, durationMs: clip.durationMs, frames: clip.frames.map(frame => [...frame]) }));
+      examples[label] = [...previous, ...(payload.examples[label] ?? [])].slice(-MOTION_LIMIT).map(clip => ({ version: clip.version, durationMs: clip.durationMs, frames: clip.frames.map(frame => [...frame]) }));
     }
     profile.motionExamples = examples;
     this.write(profile); // One write: quota failure cannot leave a partial import.
