@@ -70,7 +70,8 @@ export class SignClassifier {
    */
   async adaptFromImages(hands, onProgress = () => {}, isCancelled = () => false) {
     if (this.browserReferencesReady) return;
-    const references = Object.entries(SIGN_REFERENCES).filter(([label, path]) => !DYNAMIC_CLASSES.has(label) && !path.endsWith('.mp4'));
+    const trainedClasses = new Set(DATASET_METADATA.staticClasses);
+    const references = Object.entries(SIGN_REFERENCES).filter(([label, path]) => trainedClasses.has(label) && !DYNAMIC_CLASSES.has(label) && !path.endsWith('.mp4'));
     const adapted = [];
     let detectedHand = null;
     hands.onResults(results => { detectedHand = results.multiHandLandmarks?.[0] ?? null; });

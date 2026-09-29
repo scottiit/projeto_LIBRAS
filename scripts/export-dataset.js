@@ -40,7 +40,9 @@ for (const [index, row] of rows.entries()) {
   if (!DYNAMIC_CLASSES.has(label)) examples.push({ label, coordinates: coordinates.map(value => Number(value.toFixed(7))) });
 }
 const references = {};
-for (const label of Object.keys(counts)) {
+// Visual references remain available for training even when a class has no
+// usable CSV examples. They must not be treated as classifier prototypes.
+for (const label of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
   const directory = `Libras-20260913T224959Z-1-001/${label.toLowerCase()}`;
   const filename = readdirSync(new URL(`../${directory}/`, import.meta.url)).find(name => /\.(jpg|jpeg|png|mp4)$/i.test(name));
   if (filename) references[label] = `${directory}/${filename}`;
