@@ -107,9 +107,9 @@ test('calibration storage is bounded, profile-scoped and migration enables camer
   const store = new ProfileStore(storage);
   const ana = store.login('Ana'); store.login('Bia');
   assert.equal(ana.settings.simulation, false);
-  const samples = Array(5).fill(normalizeHand(exampleHand('A')));
-  for (let index = 0; index < 4; index++) store.saveExamples('Ana', 'A', samples);
-  assert.equal(store.read('Ana').signExamples.A.length, 12);
+  const samples = Array.from({ length: 5 }, (_, index) => ({ features: normalizeHand(exampleHand('A')), confidenceProbability: .96, capturedAt: 1000 + index, comparisonSource: 'reference' }));
+  for (let index = 0; index < 7; index++) store.saveExamples('Ana', 'A', samples);
+  assert.equal(store.read('Ana').signExamples.A.length, 30);
   assert.equal(store.read('Bia').signExamples, undefined);
   store.saveSettings('Ana', { simulation: true });
   assert.equal(store.login('Ana').settings.simulation, true);

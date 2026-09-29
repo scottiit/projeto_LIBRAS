@@ -51,6 +51,7 @@ function capture(label, options) {
   assert.fail(`No clip captured for ${label}`);
 }
 const samples = () => ({ H: [capture('H')], J: [capture('J')], K: [capture('K')], X: [capture('X')], Z: [capture('Z')] });
+const scoredMotion = (clip, confidenceProbability = .96, capturedAt = 1000) => ({ ...clip, confidenceProbability, capturedAt, comparisonSource: 'reference' });
 
 test('segmentation encodes bounded shape + anchored trajectory, not a stationary pose', () => {
   const clip = capture('Z');
@@ -212,14 +213,14 @@ test('legacy H/J/K/Z recordings and scores survive new captures and mixed-versio
   const memory = new Map(), storage = { getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value) };
   const store = new ProfileStore(storage);
   store.login('Ana'); store.login('Bia'); store.saveScore('Ana', 'alphabet', 9999);
-  store.importMotion('Ana', { version: 1, examples: previous });
-  store.saveMotion('Ana', 'X', capture('X'));
+  const legacyProfile = store.read('Ana'); legacyProfile.motionExamples = previous; store.write(legacyProfile);
+  store.saveMotion('Ana', 'X', scoredMotion(capture('X')));
   const profile = store.read('Ana');
   assert.deepEqual(profile.motionExamples.H, previous.H);
   assert.equal(profile.motionExamples.X[0].version, 1);
   assert.equal(profile.motionExamples.X[1].version, 2);
   assert.equal(profile.bestTimes.alphabet, 9999);
-  store.importMotion('Bia', JSON.parse(JSON.stringify({ version: 2, examples: profile.motionExamples })));
+  store.importTraining('Bia', JSON.parse(JSON.stringify(store.exportTraining('Ana'))));
   assert.deepEqual(store.read('Bia').motionExamples, profile.motionExamples);
   const restored = new MotionClassifier(store.read('Bia').motionExamples);
   assert.equal(restored.examples.X.length, 1);
@@ -393,22 +394,22 @@ test('lost tracking or terminal pose movement clears completed evidence, not jus
 
 test('versioned motion storage is bounded, isolated, atomically validated and export-compatible', () => {
   const memory = new Map(), storage = { getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value) };
-  const store = new ProfileStore(storage), clip = capture('Z');
+  const store = new ProfileStore(storage), clip = scoredMotion(capture('Z'));
   store.login('Ana'); store.login('Bia'); store.saveScore('Ana', 'alphabet', 1200);
-  for (let i = 0; i < 10; i++) store.saveMotion('Ana', 'Z', clip);
-  assert.equal(store.read('Ana').motionExamples.Z.length, 8);
+  for (let i = 0; i < 32; i++) store.saveMotion('Ana', 'Z', clip);
+  assert.equal(store.read('Ana').motionExamples.Z.length, 30);
   assert.equal(store.read('Bia').motionExamples, undefined);
   store.importMotion('Bia', JSON.parse(JSON.stringify({ version: MOTION_VERSION, examples: store.read('Ana').motionExamples })));
-  assert.equal(store.read('Bia').motionExamples.Z.length, 8);
+  assert.equal(store.read('Bia').motionExamples.Z.length, 30);
   const before = memory.get(store.key('Ana'));
   for (const payload of [{ version: 3, examples: { Z: [clip] } }, { version: MOTION_VERSION, examples: { A: [clip] } }, { version: MOTION_VERSION, examples: { J: [clip], Z: [null] } }]) assert.throws(() => store.importMotion('Ana', payload));
   assert.equal(memory.get(store.key('Ana')), before);
   store.removeLastMotion('Ana', 'Z');
-  assert.equal(store.read('Ana').motionExamples.Z.length, 7);
+  assert.equal(store.read('Ana').motionExamples.Z.length, 29);
   assert.equal(store.read('Ana').bestTimes.alphabet, 1200);
   storage.setItem = () => { throw new Error('quota'); };
   assert.throws(() => store.saveMotion('Ana', 'J', clip), /quota/);
-  assert.equal(store.read('Ana').motionExamples.J.length, 0);
+  assert.equal(store.read('Ana').motionExamples.J?.length ?? 0, 0);
 });
 
 test('invalid clip schemas never enter inference', () => {

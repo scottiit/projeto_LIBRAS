@@ -62,9 +62,18 @@
           <section class="capture-panel" aria-labelledby="capture-title">
             <div class="capture-heading"><h2 id="capture-title">Seus exemplos</h2><span class="local-label">Só neste perfil</span></div>
             <p id="personal-count" class="small"></p>
-            <div class="capture-actions"><button id="save-example" class="primary">Salvar exemplos deste sinal</button><button id="cancel-calibration" class="quiet" hidden>Cancelar captura</button></div>
+            <p id="training-pending" class="small" hidden></p>
+            <div class="capture-actions"><button id="save-example" class="primary">Salvar um exemplo deste sinal</button><button id="cancel-calibration" class="quiet" hidden>Cancelar captura</button></div>
+            <button id="reset-training-reference" class="quiet" hidden>Recomeçar referência provisória</button>
             <p id="calibration-status" class="capture-status" role="status"></p>
             <p id="motion-guide" class="small" hidden>Aguarde os 2 segundos de preparação. Pare na pose inicial até aparecer PRONTO. Faça o movimento e pare no final. O indicador GRAVANDO acompanha a captura.</p>
+            <details class="motion-diagnostics"><summary>Persistência e diversidade dos exemplos</summary>
+              <p id="training-buckets" class="small"></p><p id="training-retention" class="small"></p>
+              <p id="training-storage" class="small"></p>
+              <button id="export-motion" class="secondary">Exportar todo o treinamento (JSON)</button>
+              <label for="import-motion">Importar treinamento neste perfil</label><input type="file" id="import-motion" accept="application/json,.json" aria-describedby="motion-file-help">
+              <p id="motion-file-help" class="small">Até 16 MB. Inclui poses, movimentos e referências provisórias. Os exemplos são gravados em dataset_libras.csv pelo servidor Node. Limite de 30 por sinal, com até duas âncoras por faixa.</p>
+            </details>
           </section>
           <div id="training-readout-slot"></div>
         </div>
@@ -79,12 +88,9 @@
               <div class="table-scroll"><table><caption>Distâncias da última sequência (DTW)</caption><thead><tr><th scope="col">Classe</th><th scope="col">Distância</th></tr></thead><tbody id="motion-distances"></tbody></table></div>
               <p class="small">Menor distância indica maior semelhança. Esse escore não é uma probabilidade de acerto validada.</p>
               <button id="remove-motion" class="quiet">Remover último movimento</button>
-              <button id="export-motion" class="secondary">Exportar movimentos (JSON)</button>
-              <label for="import-motion">Importar movimentos neste perfil</label><input type="file" id="import-motion" accept="application/json,.json" aria-describedby="motion-file-help">
-              <p id="motion-file-help" class="small">Até 2 MB. Mantém os 8 exemplos mais recentes por classe. Exporte antes de importar para preservar sua coleção.</p>
             </details>
           </div>
-          <p class="privacy-note">Apenas coordenadas e duração são salvas. O vídeo da câmera fica no seu navegador.</p>
+          <p class="privacy-note">Coordenadas, duração, data e escore são salvos em dataset_libras.csv neste computador. O vídeo não faz parte dos exemplos.</p>
         </details>
       </div>
     </section>

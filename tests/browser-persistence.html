@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verificação de persistência — Primeiros Sinais</title>
+<style>body{max-width:52rem;margin:2rem auto;padding:1rem;font:1rem/1.5 system-ui}button{padding:.7rem;margin:.3rem}pre{white-space:pre-wrap}a{display:block;margin:1rem 0}</style>
+<h1>Verificação de persistência no navegador</h1>
+<p>Usa dados sintéticos e um espaço de armazenamento exclusivo de teste. Não acessa a câmera nem altera perfis do aplicativo. Não mede precisão de reconhecimento com pessoas.</p>
+<button id="prepare">1. Preparar exemplos de teste</button>
+<button id="reload">2. Recarregar a página</button>
+<button id="verify">3. Verificar e continuar a fila</button>
+<pre id="result" role="status">Carregando módulos…</pre>
+<a href="../index.html">Abrir o aplicativo</a>
+<script type="module">
+import { ProfileStore } from '../js/storage.js';
+import { TrainingManager } from '../js/training.js';
+import { SignClassifier, normalizeHand, coordinatesToHand } from '../js/classifier.js';
+import { MotionClassifier } from '../js/dynamic.js';
+import { SIGN_EXAMPLES } from '../js/dataset.js';
+import { summarizeExamples } from '../js/example-policy.js';
+
+const prefix = 'libras:qa:persistence:';
+const storage = { getItem: key => localStorage.getItem(prefix + key), setItem: (key, value) => localStorage.setItem(prefix + key, value) };
+const store = new ProfileStore(storage), manager = new TrainingManager(store);
+const output = document.getElementById('result');
+const reference = SIGN_EXAMPLES.find(record => record.label === 'A');
+const features = normalizeHand(coordinatesToHand(reference.coordinates), reference.aspectRatio);
+const clip = (variation = 0) => ({ version: 2, durationMs: 1000, frames: Array.from({ length: 32 }, (_, index) => [
+  ...features.map((value, coordinate) => coordinate < 3 ? value : value + variation * Math.sin(coordinate)), 0, -index / 31, 0,
+]) });
+const record = (score, capturedAt) => ({ features, confidenceProbability: score, capturedAt, comparisonSource: 'reference' });
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+const run = action => { try { action(); } catch (error) { output.textContent = `FALHA: ${error.message}`; } };
+
+function display() {
+  const name = localStorage.getItem(prefix + 'active');
+  if (!name) { output.textContent = 'Pronto. Prepare os exemplos e recarregue a página.'; return; }
+  const profile = store.read(name);
+  output.textContent = `Dados recuperados do localStorage após carregar a página:\nA: ${profile.signExamples.A.length}/30 exemplos\nK: ${profile.motionExamples?.K?.length ?? 0} movimentos aprovados\nK provisório: ${profile.pendingExamples?.K ? 'sim' : 'não'}\nFaixas de A: ${JSON.stringify(summarizeExamples(profile.signExamples.A).buckets)}`;
+}
+document.getElementById('prepare').onclick = () => run(() => {
+  const name = `QA ${Date.now()}`;
+  store.login(name);
+  store.saveExamples(name, 'A', [.88, .89, .92, .94, ...Array(26).fill(.99)].map((score, index) => record(score, index + 1)));
+  check(manager.recordMotion(name, 'K', clip(), new MotionClassifier()).state === 'pending', 'Primeira captura deveria ficar provisória.');
+  localStorage.setItem(prefix + 'active', name);
+  localStorage.setItem(prefix + 'phase', 'prepared');
+  display();
+});
+document.getElementById('reload').onclick = () => location.reload();
+document.getElementById('verify').onclick = () => run(() => {
+  const name = localStorage.getItem(prefix + 'active');
+  check(name, 'Prepare os exemplos antes de verificar.');
+  if (localStorage.getItem(prefix + 'phase') === 'prepared') {
+    check(store.read(name).pendingExamples.K, 'A captura provisória não sobreviveu à recarga.');
+    const second = manager.recordMotion(name, 'K', clip(.015), new MotionClassifier(store.read(name).motionExamples));
+    check(second.state === 'saved' && second.savedCount === 2, 'As duas execuções não foram promovidas.');
+    store.saveExamples(name, 'A', [record(.98, 31)]);
+    localStorage.setItem(prefix + 'phase', 'verified');
+  }
+  const profile = new ProfileStore(storage).read(name);
+  check(profile.signExamples.A.length === 30, 'Limite de 30 não mantido.');
+  check(profile.signExamples.A.slice(0, 4).every((value, index) => value.capturedAt === index + 1), 'Âncoras não preservadas.');
+  check(!profile.signExamples.A.some(value => value.capturedAt === 5), 'FIFO não removeu o primeiro elegível.');
+  check(profile.motionExamples.K.length === 2 && !profile.pendingExamples.K, 'Promoção não persistiu.');
+  const classifier = new SignClassifier([]); classifier.setPersonalExamples(profile.signExamples);
+  check(classifier.predictFeatures(features).targetClass === 'A', 'Poses não recarregadas na inferência.');
+  check(new MotionClassifier(profile.motionExamples).predict(clip(.01)).targetClass === 'K', 'Movimentos não recarregados na inferência.');
+  const before = storage.getItem(store.key(name));
+  let rejected = false;
+  try { store.saveExamples(name, 'A', [record(.85, 32)]); } catch { rejected = true; }
+  check(rejected && storage.getItem(store.key(name)) === before, '85% não foi rejeitado atomicamente.');
+  const backupName = `Backup ${Date.now()}`; store.login(backupName);
+  const restored = store.importTraining(backupName, JSON.parse(JSON.stringify(store.exportTraining(name))));
+  check(restored.signExamples.A.length === 30 && restored.motionExamples.K.length === 2, 'Backup incompleto.');
+  output.textContent = 'PASSOU: localStorage real, recarga dos bancos, primeira captura provisória persistente, duas execuções iniciais, limite de 30, FIFO com âncoras, rejeição de 85%, inferência com dados recarregados e backup completo.\nPode recarregar e verificar novamente.';
+});
+run(display);
+</script>
+</html>

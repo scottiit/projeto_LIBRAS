@@ -3,8 +3,10 @@ import { ProfileStore } from './storage.js';
 import { GameEngine } from './engine.js';
 import { VisionController, StaticClassifierMock } from './vision.js';
 import { SIGN_REFERENCES } from './dataset.js';
-import { MOTION_VERSION, validMotionClip } from './dynamic.js';
 import { DYNAMIC_CLASSES } from './trajectory.js';
+import { EXAMPLE_LIMIT, summarizeExamples } from './example-policy.js';
+import { TrainingManager } from './training.js';
+import { SplitProfileStorage, CsvTrainingRepository, trainingFromBrowserProfiles } from './csv-training.js';
 
 const $ = id => document.getElementById(id);
 const wideLayout = window.matchMedia('(min-width: 900px)');
@@ -14,7 +16,9 @@ function setText(id, value) {
   const element = $(id);
   if (element.textContent !== value) element.textContent = value;
 }
-let store, profile, selectedMode, sequence, simulated = false, holding = false, screen = 'profile';
+const ACTIVE_PROFILE_KEY = 'libras:v1:active-profile';
+let store, training, trainingRepository, profile, selectedMode, sequence, simulated = false, holding = false, screen = 'profile';
+let savingTraining = false;
 let debugPending = false, dropUntil = 0, session = 0, lastMockAt = 0;
 let lastMotionAlternatives = null;
 let countdownEndsAt = null;
@@ -62,31 +66,41 @@ const vision = new VisionController($('camera'), $('overlay'), (prediction, capt
   setText('camera-status', message);
   $('camera-placeholder').hidden = Boolean(vision.stream);
   $('enable-camera').textContent = vision.stream ? 'Desligar câmera' : 'Ativar câmera';
-  $('save-example').disabled = !vision.ready || Boolean(vision.calibration);
+  $('save-example').disabled = !vision.ready || Boolean(vision.calibration) || savingTraining;
   if (!vision.stream && screen === 'training' && !$('cancel-calibration').hidden) {
     finishCalibration(); $('calibration-status').textContent = 'Captura interrompida. Ative a câmera novamente.';
   }
-}, status => {
+}, async status => {
   // Captures belong exclusively to Training. A late frame after navigation
   // must never write examples or update capture controls from a minigame.
   if (screen !== 'training' || !profile) { vision.cancelCalibration(); return; }
   showMotionState(status);
   if (status.state === 'complete') {
+    const name = profile.name, token = session;
+    vision.cancelCalibration();
+    savingTraining = true;
+    $('save-example').disabled = true;
+    $('calibration-status').textContent = 'Verificando captura e gravando em dataset_libras.csv…';
     try {
-      if (status.dynamic) {
-        // Diagnose against PREVIOUS examples; matching a sample against itself is not a test.
-        renderMotionDiagnostics(vision.dynamic.classifier.predict(status.clip));
-        profile = store.saveMotion(profile.name, status.label, status.clip);
-        vision.setMotionExamples(profile.motionExamples);
-        $('calibration-status').textContent = `Movimento de ${status.label === 'UNKNOWN' ? 'rejeição' : status.label} salvo (${(status.clip.durationMs / 1000).toFixed(1)} s). Repita para testar; grave de 3 a 5 execuções variadas.`;
-        if (status.depth?.warnings?.length) $('calibration-status').textContent += ' A variação dos dedos ou da palma foi preservada no exemplo. Confira a execução com a referência.';
-      } else {
-        profile = store.saveExamples(profile.name, status.label, status.samples);
-        vision.setPersonalExamples(profile.signExamples);
-        $('calibration-status').textContent = `Cinco exemplos de ${status.label} salvos neste perfil. Faça o sinal novamente para testar.`;
+      if (status.dynamic) renderMotionDiagnostics(vision.dynamic.classifier.predict(status.clip));
+      const admission = status.dynamic ? training.recordMotion(profile.name, status.label, status.clip, vision.dynamic.classifier) : training.recordStatic(profile.name, status.label, status.samples, vision.classifier);
+      if (admission.state !== 'rejected') await trainingRepository.persist(name);
+      if (token !== session || profile?.name !== name || screen !== 'training') return;
+      profile = store.read(name);
+      vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples);
+      if (admission.state === 'pending') $('calibration-status').textContent = 'Primeira execução provisória salva neste perfil. Grave novamente: as duas precisam superar 85% de semelhança entre si. Isso mede repetibilidade, não correção do sinal.';
+      else if (admission.state === 'rejected') $('calibration-status').textContent = `Nenhum exemplo entrou na base. Semelhança: ${(admission.confidence * 100).toFixed(1)}%; precisamos de mais de 85% para ${status.label}.${admission.matchedLabel && admission.matchedLabel !== status.label ? ` A leitura correspondeu a ${admission.matchedLabel}.` : ''}${admission.provisional ? ' A primeira execução provisória foi mantida; repita ou recomece a referência.' : ''}`;
+      else {
+        $('calibration-status').textContent = `${admission.savedCount === 1 ? '1 exemplo salvo' : `${admission.savedCount} exemplos salvos`} em dataset_libras.csv para ${profile.name}. Menor semelhança: ${(admission.confidence * 100).toFixed(1)}%.${admission.comparisonSource === 'repeatability' ? ' A primeira e a segunda execução foram aprovadas: um exemplo de cada captura.' : ''}`;
+        if (status.depth?.warnings?.length) $('calibration-status').textContent += ' A variação dos dedos ou da palma foi preservada no exemplo.';
       }
-    } catch (error) { report(new Error(`Os exemplos não foram salvos: ${error.message}`)); }
-    finishCalibration();
+    } catch (error) {
+      if (token === session && profile?.name === name) {
+        profile = store.read(name);
+        vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples);
+        report(new Error(`Os exemplos não foram salvos no CSV: ${error.message}`));
+      }
+    } finally { savingTraining = false; if (token === session && profile?.name === name && screen === 'training') finishCalibration(); }
   } else if (status.state === 'timeout' || status.state === 'depth-required') {
     $('calibration-status').textContent = status.state === 'depth-required' ? `X não salvo: ${depthMessage(status.depth)} Clique em Gravar para tentar novamente.` : 'Captura encerrada. Tente novamente com a mão inteira no enquadramento, pausando antes e depois do movimento.';
     if (status.depth) renderMotionDiagnostics({ reason: 'depth-required', depth: status.depth, alternatives: [] });
@@ -205,9 +219,19 @@ function listProfiles() {
     $('profile-list').append(button);
   });
 }
-function login(name) {
+async function login(name) {
   clearError();
-  try { profile = store.login(name); vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples); dashboard(); } catch (error) { report(error); }
+  try {
+    const normalized = store.normalize(name);
+    const existing = store.read(normalized);
+    const canonicalName = existing?.name ?? normalized;
+    if (!existing) store.login(canonicalName);
+    await trainingRepository.load(canonicalName);
+    profile = store.login(canonicalName);
+    vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples);
+    localStorage.setItem(ACTIVE_PROFILE_KEY, profile.name);
+    dashboard();
+  } catch (error) { report(error); }
 }
 function dashboard() {
   session++; cancelCountdown();
@@ -305,23 +329,33 @@ function renderReference() {
   $('reference-caption').textContent = path ? `Referência de ${label} do acervo original. Confira a execução com um instrutor de LIBRAS.` : 'Não há imagem de referência para este número no acervo. Peça a um instrutor para demonstrá-lo antes de salvar.';
   const dynamic = DYNAMIC_CLASSES.has(label);
   const temporal = dynamic || label === 'UNKNOWN';
-  const busy = Boolean(vision.calibration);
+  const busy = Boolean(vision.calibration) || savingTraining;
   $('reference-title').textContent = label === 'UNKNOWN' ? 'Movimento de rejeição' : `Referência · ${label}`;
   $('training-method').textContent = label === 'X' ? 'Mantenha os dedos e a orientação da palma; afaste a mão da câmera e pare na posição final.' : temporal ? 'Sinal com movimento · execute a trajetória completa.' : 'Sinal estático · mantenha a posição dos dedos.';
   $('save-example').disabled = busy || !vision.ready;
-  $('save-example').textContent = temporal ? 'Gravar um movimento' : 'Salvar exemplos deste sinal';
+  $('save-example').textContent = temporal ? 'Gravar um movimento' : 'Salvar um exemplo deste sinal';
   $('motion-tools').hidden = !temporal;
   $('motion-guide').hidden = !temporal;
-  $('personal-count').textContent = temporal ? `${profile?.motionExamples?.[label]?.length ?? 0} de 8 movimentos salvos para ${label === 'UNKNOWN' ? 'rejeição' : label}. Recomendamos de 3 a 5 execuções.` : `${profile?.signExamples?.[label]?.length ?? 0} exemplos pessoais de ${label} salvos.`;
+  const records = (temporal ? profile?.motionExamples?.[label] : profile?.signExamples?.[label]) ?? [];
+  const summary = summarizeExamples(records);
+  $('personal-count').textContent = `${summary.total} de ${EXAMPLE_LIMIT} exemplos salvos para ${label === 'UNKNOWN' ? 'rejeição' : label}.`;
   if (label === 'X') {
     const usable = vision.dynamic.classifier.examples.X.length;
     const saved = profile?.motionExamples?.X?.length ?? 0;
-    $('personal-count').textContent = `${usable} exemplos de X disponíveis para reconhecimento. Grave de 3 a 5 recuos completos.${saved > usable ? ` ${saved - usable} exemplos anteriores estão preservados, mas precisam ser regravados com a leitura de profundidade.` : ''}`;
+    $('personal-count').textContent += ` ${usable} disponíveis para reconhecimento.${saved > usable ? ` ${saved - usable} anteriores precisam ser regravados com a leitura de profundidade.` : ''}`;
   }
+  $('training-buckets').textContent = Object.entries(summary.buckets).map(([range, bucket]) => `${range}%: ${bucket.protected}/2 âncoras (${bucket.count} exemplos)`).join(' · ');
+  $('training-retention').textContent = `Ao atingir 30, sai o mais antigo que preserve até dois exemplos por faixa.${summary.unscored ? ` ${summary.unscored} exemplos antigos sem escore foram preservados e não contam como âncoras.` : ''} Faixas incompletas aguardam exemplos; os escores não são alterados para preenchê-las.`;
+  const pending = profile?.pendingExamples?.[label];
+  $('training-pending').hidden = !pending;
+  $('training-pending').textContent = 'Há uma primeira execução provisória salva. Grave a segunda para comparar; ela ainda não participa do reconhecimento.';
+  $('reset-training-reference').hidden = !pending;
+  $('reset-training-reference').disabled = busy;
+  $('training-storage').textContent = `Exemplos deste perfil: dataset_libras.csv, na pasta do projeto. Perfis e recordes: neste navegador. Use o servidor Node local para gravar e recarregar o treinamento.`;
   if (label === 'UNKNOWN') $('reference-caption').textContent = 'Grave movimentos parecidos, mas incorretos (ex.: trajetória incompleta ou invertida), para ajudar o sistema a rejeitá-los.';
   $('remove-motion').disabled = busy || !profile?.motionExamples?.[label]?.length;
   $('import-motion').disabled = busy;
-  $('export-motion').disabled = busy || !Object.values(profile?.motionExamples ?? {}).some(clips => Array.isArray(clips) && clips.some(validMotionClip));
+  $('export-motion').disabled = busy || ![profile?.motionExamples, profile?.signExamples, profile?.pendingExamples].some(bank => bank && Object.keys(bank).length);
 }
 function finishCalibration() {
   vision.cancelCalibration();
@@ -364,7 +398,7 @@ $('calibration-class').addEventListener('change', () => {
   else { $('motion-indicator').hidden = true; $('motion-cue').hidden = true; }
 });
 $('save-example').addEventListener('click', () => {
-  if (screen !== 'training') return;
+  if (screen !== 'training' || savingTraining) return;
   try {
     vision.startCalibration($('calibration-class').value);
     $('calibration-status').textContent = 'Prepare o sinal escolhido. A captura começa em 2 segundos…';
@@ -378,35 +412,51 @@ $('save-example').addEventListener('click', () => {
   } catch (error) { $('calibration-status').textContent = error.message; }
 });
 $('cancel-calibration').addEventListener('click', () => { finishCalibration(); $('calibration-status').textContent = 'Captura cancelada; nenhum exemplo foi salvo.'; });
-$('remove-motion').addEventListener('click', () => {
-  if (screen !== 'training' || vision.calibration) return;
+$('reset-training-reference').addEventListener('click', async () => {
+  if (screen !== 'training' || vision.calibration || savingTraining) return;
+  savingTraining = true;
+  try { store.clearPendingExample(profile.name, $('calibration-class').value); profile = await trainingRepository.persist(profile.name); renderReference(); $('calibration-status').textContent = 'Referência provisória removida do CSV. Grave uma nova primeira execução.'; }
+  catch (error) { profile = store.read(profile.name); renderReference(); report(error); }
+  finally { savingTraining = false; renderReference(); }
+});
+$('remove-motion').addEventListener('click', async () => {
+  if (screen !== 'training' || vision.calibration || savingTraining) return;
+  savingTraining = true;
   try {
-    profile = store.removeLastMotion(profile.name, $('calibration-class').value);
+    store.removeLastMotion(profile.name, $('calibration-class').value);
+    profile = await trainingRepository.persist(profile.name);
     vision.setMotionExamples(profile.motionExamples); renderReference();
-    $('calibration-status').textContent = 'Último movimento desta classe removido.';
-  } catch (error) { report(error); }
+    $('calibration-status').textContent = 'Último movimento desta classe removido do CSV.';
+  } catch (error) { profile = store.read(profile.name); renderReference(); report(error); }
+  finally { savingTraining = false; renderReference(); }
 });
 $('export-motion').addEventListener('click', () => {
-  if (screen !== 'training' || vision.calibration) return;
-  // Preserve valid legacy X clips in backups even though inference needs new captures.
-  const examples = Object.fromEntries(Object.entries(profile.motionExamples ?? {}).filter(([label]) => DYNAMIC_CLASSES.has(label) || label === 'UNKNOWN').map(([label, clips]) => [label, Array.isArray(clips) ? clips.filter(validMotionClip).slice(-8) : []]));
-  const blob = new Blob([JSON.stringify({ version: MOTION_VERSION, examples })], { type: 'application/json' });
-  const url = URL.createObjectURL(blob), anchor = document.createElement('a');
-  anchor.href = url; anchor.download = `libras-movimentos-v${MOTION_VERSION}.json`; anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  if (screen !== 'training' || vision.calibration || savingTraining) return;
+  try {
+    const blob = new Blob([JSON.stringify(store.exportTraining(profile.name))], { type: 'application/json' });
+    const url = URL.createObjectURL(blob), anchor = document.createElement('a');
+    anchor.href = url; anchor.download = 'libras-treinamento-v1.json'; anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { report(error); }
 });
 $('import-motion').addEventListener('change', async event => {
   const file = event.target.files?.[0], token = session;
   event.target.value = '';
-  if (!file || screen !== 'training' || vision.calibration) return;
+  if (!file || screen !== 'training' || vision.calibration || savingTraining) return;
   try {
-    if (file.size > 2000000) throw new Error('O arquivo excede o limite de 2 MB.');
+    if (file.size > 16 * 1024 * 1024) throw new Error('O arquivo excede o limite de 16 MB.');
     const payload = JSON.parse(await file.text());
     if (token !== session || screen !== 'training' || vision.calibration) return;
-    profile = store.importMotion(profile.name, payload);
-    vision.setMotionExamples(profile.motionExamples); renderReference();
-    $('calibration-status').textContent = 'Movimentos importados neste perfil. Teste com execuções novas.';
-  } catch (error) { report(new Error(`Importação não concluída: ${error.message}`)); }
+    savingTraining = true;
+    if (payload.kind === 'libras-browser-profiles') {
+      store.importTraining(profile.name, trainingFromBrowserProfiles(payload, profile.name));
+    } else if (payload.kind === 'libras-training') store.importTraining(profile.name, payload);
+    else store.importMotion(profile.name, payload);
+    profile = await trainingRepository.persist(profile.name);
+    vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples); renderReference();
+    $('calibration-status').textContent = 'Treinamento importado e salvo em dataset_libras.csv. Teste com execuções novas.';
+  } catch (error) { profile = store.read(profile.name); vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples); report(new Error(`Importação não concluída: ${error.message}`)); }
+  finally { savingTraining = false; renderReference(); }
 });
 function releaseHold() {
   holding = false;
@@ -424,7 +474,7 @@ $('simulation').addEventListener('change', () => {
 });
 $('switch-profile').addEventListener('click', () => {
   session++; cancelCountdown(); engine.cancel(); releaseHold(); finishCalibration(); vision.stop(); profile = null; clearError();
-  try { listProfiles(); } catch (error) { report(error); }
+  try { localStorage.removeItem(ACTIVE_PROFILE_KEY); listProfiles(); } catch (error) { report(error); }
   showScreen('profile', 'profile-name');
 });
 for (const id of ['back-menu', 'result-menu']) $(id).addEventListener('click', dashboard);
@@ -532,7 +582,14 @@ async function update(now) {
   }
   requestAnimationFrame(update);
 }
-try { store = new ProfileStore(localStorage); listProfiles(); }
+try {
+  const splitStorage = new SplitProfileStorage(localStorage);
+  store = new ProfileStore(splitStorage); training = new TrainingManager(store);
+  trainingRepository = new CsvTrainingRepository(store, splitStorage, localStorage);
+  listProfiles();
+  const activeName = localStorage.getItem(ACTIVE_PROFILE_KEY);
+  if (activeName && store.read(activeName)) void login(activeName);
+}
 catch (error) { report(new Error(`O armazenamento local está indisponível: ${error.message}. Permita o armazenamento do site para criar um perfil.`)); }
 $('boot-status').hidden = true;
 requestAnimationFrame(update);

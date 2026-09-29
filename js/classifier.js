@@ -1,5 +1,6 @@
 import { SIGN_EXAMPLES, DATASET_METADATA, SIGN_REFERENCES } from './dataset.js';
 import { isValidHand, DYNAMIC_CLASSES } from './trajectory.js';
+import { EXAMPLE_LIMIT } from './example-policy.js';
 
 export function normalizeHand(hand, aspectRatio = 1) {
   if (!isValidHand(hand)) return null;
@@ -54,7 +55,10 @@ export class SignClassifier {
     if (!examples || typeof examples !== 'object') return;
     for (const [label, samples] of Object.entries(examples)) {
       if (!/^[A-Z0-9]$/.test(label) || DYNAMIC_CLASSES.has(label) || !Array.isArray(samples)) continue;
-      for (const features of samples.slice(-12)) if (validFeatures(features)) this.personal.push({ label, features: [...features], source: 'personal' });
+      for (const sample of samples.slice(-EXAMPLE_LIMIT)) {
+        const features = Array.isArray(sample) ? sample : sample?.features;
+        if (validFeatures(features)) this.personal.push({ label, features: [...features], source: 'personal' });
+      }
     }
   }
   hasClass(label) { return [...this.base, ...this.personal].some(example => example.label === label); }
@@ -94,9 +98,13 @@ export class SignClassifier {
     hands.reset();
   }
   predict(hand, domain = 'alphabet', aspectRatio = 1) {
+    return this.predictFeatures(normalizeHand(hand, aspectRatio), domain);
+  }
+  /** The training capture already contains normalized vectors. Evaluate them
+   * against the PREVIOUS dataset, before saving, with the same decision metric. */
+  predictFeatures(features, domain = 'alphabet') {
     const result = { targetClass: null, confidenceProbability: 0, timestamp: Date.now(), source: 'examples', alternatives: [] };
-    const features = normalizeHand(hand, aspectRatio);
-    if (!features) return result;
+    if (!validFeatures(features)) return result;
     const variants = [];
     for (const mirror of [1, -1]) for (const angle of [-Math.PI / 15, 0, Math.PI / 15]) {
       const sin = Math.sin(angle), cos = Math.cos(angle);
@@ -141,7 +149,8 @@ export class CalibrationSession {
     this.samples.push({ features, time });
     const elapsed = time - this.samples[0].time;
     if (elapsed < 1200 || this.samples.length < 12) return { state: 'collecting', progress: Math.min(1, elapsed / 1200) };
-    // Keep five representative observations, not hundreds of correlated frames.
+    // Five observations validate this execution; TrainingManager consolidates
+    // them into ONE stored example after every observation passes admission.
     const samples = Array.from({ length: 5 }, (_, index) => this.samples[Math.floor(index * (this.samples.length - 1) / 4)].features);
     return { state: 'complete', label: this.label, samples };
   }

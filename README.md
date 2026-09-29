@@ -1,17 +1,17 @@
 # Primeiros Sinais — piloto web de LIBRAS
 
-Aplicação client-side em HTML, CSS e JavaScript Vanilla, com seis minigames, perfis locais, cronômetro, MediaPipe Hands e confirmação contínua de um segundo.
+Aplicação web local em HTML, CSS e JavaScript Vanilla, com seis minigames, perfis locais, cronômetro, MediaPipe Hands e confirmação contínua de um segundo. O reconhecimento roda no navegador; o servidor Node grava os exemplos de treinamento em `dataset_libras.csv`.
 
 ## Requisitos
 
 - navegador atualizado com acesso à câmera;
 - conexão com a internet para carregar o MediaPipe pela CDN;
 - pasta `Libras-20260913T224959Z-1-001` presente junto ao aplicativo, pois suas mídias são usadas como referências;
-- uma das opções abaixo para servir os arquivos em `localhost`.
+- Node.js 18 ou mais recente para servir a aplicação e gravar o CSV.
 
-O reconhecimento e os perfis rodam no navegador. O servidor local apenas entrega arquivos estáticos: não recebe imagens da câmera e não executa inferência.
+O reconhecimento roda no navegador. O servidor local recebe apenas coordenadas e metadados de exemplos aprovados, sem imagens ou vídeo da câmera, e atualiza `dataset_libras.csv`. Perfis, preferências e recordes continuam no `localStorage` do navegador.
 
-## Executar — opção recomendada
+## Executar
 
 Na raiz do projeto, usando Node.js 18 ou mais recente:
 
@@ -46,24 +46,15 @@ Se o terminal estava aberto durante a instalação, feche-o e abra um novo para 
 & "C:\Program Files\nodejs\node.exe" scripts\serve.js
 ```
 
-Execute o comando a partir de `C:\projetos\projeto_LIBRAS`. Se aparecer uma mensagem informando que a porta 5173 já está em uso, tente primeiro abrir `http://127.0.0.1:5173`: normalmente já existe uma instância do servidor em execução.
+Execute o comando a partir de `C:\projetos\projeto_LIBRAS`. Se aparecer uma mensagem informando que a porta 5173 já está em uso, encerre a instância anterior e reinicie o servidor com o código atual. Um processo antigo pode não ter a rota de gravação do CSV.
 
-## Executar — alternativa com Live Server
-
-Se a extensão Live Server já estiver instalada no VS Code:
-
-1. clique com o botão direito em `index.html`;
-2. escolha **Open with Live Server**;
-3. use a URL `http://localhost:...` aberta pela extensão;
-4. autorize a câmera no navegador.
-
-Use sempre a mesma origem durante os testes. Perfis e exemplos pessoais ficam no `localStorage`; `127.0.0.1:5173`, `localhost:5500` e `file://` possuem armazenamentos separados.
+O Live Server e a abertura direta de `index.html` não gravam o CSV. Abra sempre `http://127.0.0.1:5173` pelo servidor Node deste projeto. Perfis e recordes continuam vinculados à origem do navegador; use o mesmo endereço para reencontrá-los.
 
 ## Abertura direta do HTML
 
-O arquivo `index.html` possui um bundle para abertura por duplo clique, mas esse caminho é apenas uma compatibilidade auxiliar. Permissões de câmera, carregamento de mídias locais, módulos e persistência em `file://` variam entre navegadores.
+O navegador não consegue alterar diretamente um arquivo do projeto. Ao abrir `index.html` por `file://`, a página informa como iniciar o servidor Node; o treinamento requer a rota local de gravação.
 
-Para testar o reconhecimento pela webcam, use `localhost` por uma das duas opções anteriores. Não trate a abertura direta como o modo oficial de execução.
+Se você já gravou exemplos abrindo `index.html` por `file://`, use o botão **Exportar exemplos antigos (JSON)** nessa mesma página e navegador. Em seguida, abra `http://127.0.0.1:5173`, selecione ou crie o perfil com o mesmo nome e importe o JSON na aba Treinamento. Repita a importação para cada perfil do arquivo. `file://` e o endereço HTTP têm armazenamentos separados; esta passagem não pode ser automática.
 
 ## Usar o piloto
 
@@ -74,7 +65,19 @@ Para testar o reconhecimento pela webcam, use `localhost` por uma das duas opç�
 5. Toque em **Iniciar partida**, logo abaixo da câmera. Há uma contagem visível de **3, 2, 1** para se preparar. O cronômetro e a validação começam somente ao fim da contagem. Sair da tela, desligar a câmera ou ocultar a página cancela a contagem.
 6. Um sinal só avança quando a classe correta mantém escore estritamente superior a 85% por pelo menos 1000 ms contínuos. Se faltarem exemplos, a partida informa quais são. Toque em **← Desafios** e abra a aba **Treinamento** para prepará-los. As abas aparecem apenas nas telas de Desafios e Treinamento; durante a partida, a navegação fica fora da área de prática. Sair de uma captura cancela a coleta e libera novamente o seletor.
 
-Os exemplos pessoais guardam apenas landmarks normalizados no perfil local. A captura aprende a pose mostrada; ela não verifica se o sinal ensinado está linguisticamente correto.
+Os exemplos pessoais guardam coordenadas normalizadas e metadados da captura em `dataset_libras.csv`, separados por nome de perfil, sem vídeo. Eles são recarregados do arquivo ao abrir o perfil. A comparação mede semelhança com referências; ela não verifica se o sinal ensinado está linguisticamente correto.
+
+### Persistência, admissão e diversidade dos exemplos
+
+- Cada captura aprovada é gravada em `dataset_libras.csv`, com perfil, sinal, `confidenceProbability`, `capturedAt` e `comparisonSource`. A interface confirma o salvamento somente depois que o servidor atualiza o arquivo. A classificação usa as referências **anteriores** à captura: um exemplo não pode aprovar a si próprio.
+- Novos exemplos só entram na base quando a classe reconhecida corresponde à escolhida e o escore é **estritamente maior que 0,85**, até 1. Valores ausentes, inválidos e exatamente 85% são recusados. **Uma captura aprovada equivale a um exemplo**, tanto para poses quanto para movimentos. A captura estática verifica até cinco observações da mesma execução; se qualquer uma falhar, a captura inteira é recusada. Salva apenas a observação mais central (medoide pela distância entre poses), com o menor escore da captura para determinar sua faixa. Os frames internos não ocupam espaços individuais. Registros salvos pelas versões anteriores permanecem preservados; não são agrupados ou apagados retroativamente.
+- **Sem referência da classe:** a primeira execução fica salva como referência provisória, fora do reconhecedor. Faça uma segunda captura independente. As duas são comparadas nos dois sentidos e só entram na base se todas as comparações superarem 85%, mantendo a concorrência com as outras classes cadastradas. Se falhar, a primeira continua disponível após uma recarga; o botão **Recomeçar referência provisória** permite substituí-la. Esse procedimento mede repetibilidade, não correção linguística.
+- O limite é **30 exemplos por classe e por perfil**, para poses e movimentos. Ao excedê-lo, sai o exemplo de inserção mais antiga cuja remoção não deixe uma faixa com menos de dois representantes. As faixas são `85% < x ≤ 90%`, `90% < x ≤ 95%` e `95% < x ≤ 100%`. Ao chegar um terceiro exemplo de uma faixa, o mais antigo dela volta a ser elegível para remoção. Datas importadas não reorganizam a fila.
+- As seis âncoras representam 20% da capacidade quando as três faixas têm exemplos suficientes. A interface informa quantas faltam; não gera exemplos nem altera escores para completar cotas. Isso preserva diversidade de **escores**, sem garantir diversidade de pessoas, câmeras ou poses, nem eliminar overfitting.
+- Exemplos antigos sem escore continuam preservados, sem receber confiança inventada nem proteção de faixa. Continuam utilizáveis quando compatíveis com o reconhecedor; em particular, X v1 ainda precisa ser regravado. Na fila, esses registros antigos podem sair por FIFO.
+- O CSV mantém as 137 linhas de referência originais e acrescenta colunas para tipo de registro, perfil, escore, data, origem da comparação e conteúdo de movimentos/referências provisórias. Cada exemplo pessoal aprovado ocupa uma linha; movimentos completos são representados como JSON em uma célula do CSV. O servidor valida o arquivo recebido e o substitui por escrita temporária seguida de renomeação; falhas não indicam sucesso.
+
+Abra **Persistência e diversidade dos exemplos** no Treinamento para consultar faixas e exportar/importar um backup. Na primeira abertura do perfil pelo **mesmo endereço HTTP** após esta atualização, os exemplos antigos do `localStorage` são copiados para o CSV e removidos do armazenamento do navegador somente após a confirmação do servidor. Exemplos salvos anteriormente em `file://` exigem a exportação/importação descrita acima. Perfis e recordes continuam no navegador; limpar os dados do site apaga esses metadados, enquanto o CSV permanece no projeto. Não há sincronização automática entre dispositivos.
 
 ### Letras e números disponíveis
 
@@ -101,8 +104,8 @@ O motor temporal roda integralmente no navegador. O rastreador continua sendo o 
 
 1. Entre na aba **Treinamento**, ative a câmera e selecione **H**, **J**, **K**, **X** ou **Z**. Confira o vídeo disponível e a execução com um instrutor. Para sair de uma partida, use **← Desafios** e depois abra o Treinamento.
 2. Clique em **Gravar um movimento**. Aguarde dois segundos de preparação e pare brevemente na posição inicial. O indicador sobre a câmera mostra **PRONTO · MOVA** quando o segmentador estiver armado.
-3. Faça o movimento completo **depois** de aparecer PRONTO. Ao detectar o deslocamento, o indicador muda para **GRAVANDO EXEMPLO** e a borda da câmera fica vermelha. Pare na posição final; a captura detecta o fim, salva a sequência e informa a duração. Ao iniciar uma captura, a página traz a câmera para a área visível. Não clique novamente para encerrar. Há até 15 segundos para concluir a captura.
-4. Grave de **3 a 5 execuções corretas por classe**, com pequenas variações de velocidade e posição. Basta uma para habilitar a classe, mas isso não demonstra robustez. São mantidas as oito gravações mais recentes por classe. Em **Diagnóstico e exemplos salvos**, **Remover último movimento** permite desfazer uma captura ruim; exportação e importação também ficam nessa área.
+3. Faça o movimento completo **depois** de aparecer PRONTO. Ao detectar o deslocamento, o indicador muda para **GRAVANDO EXEMPLO** e a borda da câmera fica vermelha. Pare na posição final; a captura detecta o fim e verifica a admissão antes de salvar. Ao iniciar uma captura, a página traz a câmera para a área visível. Não clique novamente para encerrar. Há até 15 segundos para concluir a captura.
+4. Grave de **3 a 5 execuções corretas por classe**, com pequenas variações de velocidade e posição. Uma classe sem referências exige duas capturas mutuamente semelhantes acima de 85% para iniciar sua base; isso não demonstra robustez. O limite é de 30 exemplos, com FIFO e proteção de duas âncoras por faixa. Em **Diagnóstico e exemplos salvos**, **Remover último movimento** permite desfazer uma captura ruim. O backup fica em **Persistência e diversidade dos exemplos**.
 5. Para testar, repita o sinal **sem gravar**, após o indicador mostrar PRONTO. O reconhecedor compara todas as classes dinâmicas cadastradas e pode responder **não reconhecida**. Abra **Diagnóstico e exemplos salvos** para ver a distância de cada classe. A comparação exibida ao gravar usa somente os exemplos anteriores, antes de adicionar a nova captura.
 6. Escolha **Rejeição** e grave contraexemplos: trajetórias invertidas, incompletas ou movimentos que estejam causando acertos indevidos. Eles competem com as letras; nunca contam como acerto.
 7. Volte ao jogo, aguarde a contagem de três segundos, espere PRONTO, faça o movimento e **mantenha a pose final por mais um segundo** depois do reconhecimento. Uma sequência reconhecida uma vez não aprova duas letras consecutivas: é necessário executar o movimento novamente.
@@ -120,7 +123,7 @@ Fluxo: `MediaPipe → segmentação → normalização/re-amostragem → DTW ent
 - **Profundidade:** o `z` do MediaPipe é relativo ao pulso; permanece na forma dos dedos com peso reduzido. Não representa a distância absoluta da mão até a câmera. O motor não usa `z` do pulso como prova de aproximação do usuário. Veja a [documentação oficial de Hands](https://chuoling.github.io/mediapipe/solutions/hands.html#multi_hand_landmarks).
 - **Re-amostragem:** interpolação linear em instantes uniformes gera 32 amostras por sequência. A duração original também é armazenada. Isso normaliza a velocidade global; o DTW acomoda diferenças locais de velocidade. Não interpolamos sobre perda de tracking.
 - **Custo local:** `c(a,b) = sqrt(dPose(a,b)^2 + (0.55 * ||trajetoria(a)-trajetoria(b)||)^2 + (wDepth * (recuo(a)-recuo(b)))^2)`. `dPose` reutiliza a RMS ponderada do classificador estático: pontas dos dedos pesam 2 e o eixo Z pesa 0,45. `wDepth = 1.2` ao comparar X ou rejeições v2; H/J/K/Z conservam o custo anterior de pose + trajetória XY. Ao comparar com um exemplo v1, não se inventa profundidade ausente. X exige exemplos novos com recuo válido.
-- **DTW exato restrito:** `D(i,j) = c(i,j) + min(D(i-1,j), D(i,j-1), D(i-1,j-1))`, dentro de uma banda diagonal de 25% (8 amostras). Dividimos o custo acumulado pelo comprimento do caminho selecionado. A memória é linear; com 32 amostras e até 48 exemplos (cinco sinais e a classe de rejeição, oito por classe), o trabalho é limitado e ocorre ao concluir o movimento. Esta implementação **não é FastDTW** e não reproduz integralmente os artigos.
+- **DTW exato restrito:** `D(i,j) = c(i,j) + min(D(i-1,j), D(i,j-1), D(i-1,j-1))`, dentro de uma banda diagonal de 25% (8 amostras). Dividimos o custo acumulado pelo comprimento do caminho selecionado. A memória é linear; com 32 amostras e até 180 exemplos (cinco sinais e a classe de rejeição, 30 por classe), o trabalho é limitado e ocorre ao concluir o movimento. A ampliação da base aumenta o custo da comparação e ainda exige medição em celulares. Esta implementação **não é FastDTW** e não reproduz integralmente os artigos.
 - **Decisão:** por exemplo, calculamos `d = max(custoDTW, 0.6 * custoMedioDosExtremos)`, evitando que o alinhamento esconda início/fim incompatíveis. Escolhemos a menor distância por classe. `similaridade = exp(-0.5 * (d/0.22)^2)`; `separacao = clamp((dSegundo-dPrimeiro)/0.12, 0, 1)`; `escore = min(similaridade, 0.5+0.5*separacao)`. Sem segunda classe, usamos separação 1, o que torna especialmente importante gravar classes concorrentes e contraexemplos. Uma correspondência só é aceita acima de 0,85, e `UNKNOWN` sempre rejeita. Os limiares são iniciais, ainda sem calibração em uma base de validação.
 - **Independência do alvo:** `MotionClassifier.predict(clip)` não recebe a letra solicitada. O jogo encaminha H/J/K/X/Z ao domínio temporal e compara a classe retornada ao alvo somente depois. Portanto, este é reconhecimento de sinais isolados dentro de um domínio, não transcrição contínua de toda a língua.
 - **Continuidade:** depois de reconhecer a sequência, somente novos frames compatíveis com a pose final sustentam o escore por até 1,8 s. O `GameEngine` exige mais de 85% durante 1000 ms contínuos. Frame inválido, intervalo superior a 180 ms, troca de mão, mudança de pose ou troca de alvo revogam a evidência. O cronômetro geral continua correndo.
@@ -151,11 +154,20 @@ Grave exemplos novos de **H e K** no Treinamento para que as duas classes concor
 - `js/depth.js`: escala aparente da palma, coerência entre distâncias e validação do recuo de X.
 - `js/dynamic.js`: `MotionSegmenter`, `MotionCapture`, `MotionClassifier`, `TemporalRecognizer`, DTW e validação do formato.
 - `js/vision.js`: captura serial com MediaPipe e integração com o motor temporal.
-- `js/storage.js`: `motionExamples` opcional no perfil existente; preserva poses estáticas e recordes anteriores. Recordes anteriores não são recalculados, portanto tempos obtidos com reconhecedores diferentes não são comparáveis rigorosamente.
+- `js/storage.js`: regras de perfis, pontuação, referências provisórias e backup completo. Preserva poses estáticas e recordes anteriores. Recordes anteriores não são recalculados, portanto tempos obtidos com reconhecedores diferentes não são comparáveis rigorosamente.
+- `js/csv-training.js`: separa os metadados do navegador dos exemplos em memória, carrega/salva treinamento pelo servidor e migra exemplos antigos.
+- `scripts/training-csv.js`: valida e grava linhas no CSV com substituição atômica do arquivo.
+- `js/storage-codec.js`: codificação transitória para compatibilidade com os exemplos antigos do navegador.
+- `js/example-policy.js`: limiar estrito, faixas de semelhança e retenção FIFO estratificada.
+- `js/training.js`: avaliação antes da inserção e inicialização da base por duas execuções independentes.
 - `js/trajectory.js`: heurísticas anteriores preservadas apenas como referência e regressão; não classificam as partidas atuais.
 - `tests/dynamic.test.js`: geometria sintética, variação de velocidade/escala/espelhamento, rejeição, continuidade e persistência. Esses testes não medem acurácia com pessoas.
 
-**Exportar movimentos (JSON)** salva apenas a versão do formato e exemplos por classe; não inclui nome do perfil, fotos, vídeos ou histórico. **Importar** adiciona exemplos ao perfil atual, limitados aos oito mais recentes por classe. O formato v2 grava 32 vetores de 66 valores e duração de 250 a 4500 ms. Exemplos v1 de 65 valores continuam importáveis e mantêm sua versão; exportações v2 podem conter ambas as versões. Os exemplos antigos de H/J/K/Z continuam utilizáveis. X v1 permanece armazenado/exportável, mas não participa do reconhecimento: sua profundidade foi descartada e precisa ser regravada. Arquivos acima de 2 MB, versões desconhecidas, classes não suportadas, valores não finitos e sequências inválidas são recusados antes da escrita. Falhas de cota do localStorage são informadas sem sucesso aparente. Mantenha uma exportação antes de substituir exemplos; limpar os dados do site apaga a coleção local.
+**Exportar todo o treinamento (JSON)** gera `libras-treinamento-v1.json`: poses, movimentos, metadados, referências provisórias e ordem FIFO, incluindo referências antigas explicitamente separadas em `legacyReferences`. Não inclui nome do perfil, fotos, vídeos, recordes ou histórico de acessos. **Importar** mescla esse backup ao perfil atual no CSV, respeitando o limite de 30 e as faixas protegidas.
+
+O formato dos movimentos v2 mantém 32 vetores de 66 valores e duração de 250 a 4500 ms. Movimentos v1 de 65 valores preservados no backup completo mantêm sua versão; H/J/K/Z continuam utilizáveis. X v1 permanece armazenado/exportável, mas não participa do reconhecimento: sua profundidade foi descartada e precisa ser regravada. A importação no formato antigo `{version, examples}` exige agora escore aprovado e metadados; arquivos antigos sem esses campos não são admitidos como capturas novas. Dados legados já presentes no perfil são preservados e podem ser transportados pelo novo backup completo, sem atribuir-lhes aprovação retroativa.
+
+Arquivos acima de 16 MiB, versões desconhecidas, classes não suportadas, valores não finitos e sequências inválidas são recusados antes da escrita. Falhas de gravação do CSV são informadas sem sucesso aparente. Mantenha uma exportação antes de importar ou editar o arquivo manualmente.
 
 ### X: recuo e tamanho aparente da palma
 
@@ -208,6 +220,8 @@ Executar todos os testes:
 node --test
 ```
 
+Para verificar a leitura e escrita do CSV, rode `node --test tests/training-csv.test.js`. O teste usa um arquivo temporário e não altera o dataset do projeto. `tests/browser-persistence.html` permanece apenas para testar a camada antiga de armazenamento isoladamente; ele não valida o fluxo novo do CSV.
+
 Quando `dataset_libras.csv` ou as mídias de referência forem alterados, regenere o dataset do navegador e depois o bundle:
 
 ```powershell
@@ -215,7 +229,7 @@ node scripts/export-dataset.js
 node scripts/build.js
 ```
 
-Depois de qualquer alteração nos módulos de `js/`, regenere o bundle usado em `file://`:
+Depois de qualquer alteração nos módulos de `js/`, regenere o bundle distribuído com o projeto:
 
 ```powershell
 node scripts/build.js
@@ -226,7 +240,7 @@ Arquivos gerados que não devem ser editados manualmente:
 - `js/dataset.js`, gerado por `scripts/export-dataset.js`;
 - `js/app.bundle.js`, gerado por `scripts/build.js`.
 
-Via HTTP, o aplicativo usa diretamente os ES Modules. O bundle existe somente para a compatibilidade auxiliar com `file://`.
+Via HTTP, o aplicativo usa diretamente os ES Modules. A gravação do CSV exige o servidor Node mesmo quando se abre o HTML localmente.
 
 ## Diagnóstico das referências
 

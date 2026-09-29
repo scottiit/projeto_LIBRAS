@@ -1,10 +1,11 @@
 import { isValidHand, DYNAMIC_CLASSES } from './trajectory.js';
 import { normalizeHand, featureDistance } from './classifier.js';
 import { apparentPalmSize, coherentPalmScale, depthRetreat, DEPTH_WEIGHT, DEPTH_AXIS } from './depth.js';
+import { EXAMPLE_LIMIT } from './example-policy.js';
 
 export const MOTION_VERSION = 2;
 export const MOTION_LABELS = [...DYNAMIC_CLASSES, 'UNKNOWN'];
-export const MOTION_LIMIT = 8;
+export const MOTION_LIMIT = EXAMPLE_LIMIT;
 const MOTION_SAMPLES = 32;
 const MOTION_GAP = 180;
 const motionClamp = value => Math.max(0, Math.min(1, value));
@@ -43,7 +44,7 @@ function temporalCost(a, b, includeDepth = true) {
   return Math.hypot(featureDistance(a, b), .55 * Math.hypot(a[63] - b[63], a[64] - b[64]), depth);
 }
 
-/** Strict, bounded schema also used for localStorage and untrusted JSON imports. */
+/** Strict, bounded schema for CSV training records and JSON imports. */
 export function validMotionClip(clip) {
   return Boolean(clip && [1, MOTION_VERSION].includes(clip.version) && Number.isFinite(clip.durationMs) && clip.durationMs >= 250 && clip.durationMs <= 4500 &&
     Array.isArray(clip.frames) && clip.frames.length === MOTION_SAMPLES && clip.frames.every(frame => Array.isArray(frame) && frame.length === (clip.version === 1 ? 65 : 66) && frame.every(value => Number.isFinite(value) && Math.abs(value) <= 20)) &&
