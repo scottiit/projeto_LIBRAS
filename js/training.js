@@ -49,8 +49,11 @@ export class TrainingManager {
       // UNKNOWN is an explicit negative class: it can seed rejection examples,
       // but its accepted comparison must never become positive game evidence.
       const matchedLabel = label === 'UNKNOWN' ? prediction.alternatives?.[0]?.label : prediction.targetClass;
-      const confidence = label === 'UNKNOWN' ? prediction.similarityScore : prediction.confidenceProbability;
-      return { confidence, matchedLabel, accepted: matchedLabel === label && validExampleConfidence(confidence) };
+      const confidence = candidate.kind === 'motion' ? prediction.similarityScore : prediction.confidenceProbability;
+      // Rejected game evidence deliberately has confidenceProbability=0. It
+      // must not overwrite the actual comparison score in training feedback.
+      // Admission still requires an accepted class (or explicit UNKNOWN).
+      return { confidence, matchedLabel: matchedLabel ?? prediction.alternatives?.[0]?.label ?? null, reason: prediction.reason, accepted: matchedLabel === label && validExampleConfidence(confidence, label) };
     });
   }
   records(candidate, assessments, capturedAt, comparisonSource) {
@@ -87,6 +90,6 @@ export class TrainingManager {
   }
   rejected(profile, assessments, provisional) {
     const failure = assessments.find(item => !item.accepted);
-    return { state: 'rejected', profile, savedCount: 0, provisional, confidence: Number.isFinite(failure?.confidence) ? failure.confidence : 0, matchedLabel: failure?.matchedLabel ?? null };
+    return { state: 'rejected', profile, savedCount: 0, provisional, confidence: Number.isFinite(failure?.confidence) ? failure.confidence : null, reason: failure?.reason, matchedLabel: failure?.matchedLabel ?? null };
   }
 }

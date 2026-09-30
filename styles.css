@@ -158,6 +158,8 @@ input::file-selector-button { min-height: 40px; margin-right: 8px; border: 1px s
 body[data-capturing="true"] .camera-stage[data-motion-state="recording"] { outline: 3px solid #b6372c; outline-offset: 2px; }
 body[data-capturing="true"] .camera-stage[data-motion-state="recording"] .motion-indicator { background: #a83228; color: #fff; animation: recording-pulse .9s ease-in-out infinite alternate; }
 .camera-stage[data-motion-state="confirming"] .motion-indicator { background: #bce5d1; }
+.camera-stage[data-motion-state="occluded"] .motion-indicator { background: #fff0c6; color: #654d12; }
+body[data-capturing="true"] .camera-stage[data-motion-state="occluded"] { outline: 3px solid #a67c1b; outline-offset: 2px; }
 @keyframes recording-pulse { to { opacity: .72; } }
 .motion-cue { margin: 8px 0 0; padding: 5px 2px; color: var(--ink); font-size: .78rem; }
 .countdown-overlay { position: absolute; inset: 0; z-index: 5; display: grid; place-content: center; text-align: center; background: #102e27bd; color: #fff; backdrop-filter: blur(2px); }

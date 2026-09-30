@@ -1,4 +1,6 @@
-export const CONFIDENCE_THRESHOLD = 0.85;
+import { MIN_EXAMPLE_CONFIDENCE, validExampleConfidence } from './example-policy.js';
+
+export const CONFIDENCE_THRESHOLD = MIN_EXAMPLE_CONFIDENCE;
 export const HOLD_DURATION = 1000;
 export const MAX_FRAME_GAP = 180;
 
@@ -29,7 +31,8 @@ export class GameEngine {
   }
   /**
    * observedAt is a monotonic capture time (performance.now), not Date.now.
-   * Missing/wrong/<=85% predictions reset immediately, including exactly 85%.
+   * Missing/wrong/at-or-below-threshold predictions reset immediately:
+   * J requires >75%; other classes require >85%. Exactly the boundary fails.
    * Duplicate/out-of-order, delayed frames and gaps >180 ms also break continuity.
    * The first good frame starts at zero; approval occurs only on a fresh frame
    * reaching >=1000 ms. No rounding, accumulated disjoint holds or timer shortcut.
@@ -38,7 +41,7 @@ export class GameEngine {
     if (this.state !== 'running') return false;
     const now = this.clock();
     const invalid = !prediction || prediction.targetClass !== this.current.target ||
-      !Number.isFinite(prediction.confidenceProbability) || prediction.confidenceProbability <= CONFIDENCE_THRESHOLD || prediction.confidenceProbability > 1 ||
+      !validExampleConfidence(prediction.confidenceProbability, this.current.target) ||
       !Number.isFinite(prediction.timestamp) || !Number.isFinite(observedAt) || observedAt < this.startedAt || observedAt > now || now - observedAt > MAX_FRAME_GAP;
     if (invalid) { this.resetHold(); return false; }
     if (this.lastObservationAt !== null && observedAt <= this.lastObservationAt) { this.resetHold(); return false; }

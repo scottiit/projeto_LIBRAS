@@ -4,7 +4,7 @@ import { GameEngine } from './engine.js';
 import { VisionController, StaticClassifierMock } from './vision.js';
 import { SIGN_REFERENCES } from './dataset.js';
 import { DYNAMIC_CLASSES } from './trajectory.js';
-import { EXAMPLE_LIMIT, summarizeExamples } from './example-policy.js';
+import { EXAMPLE_LIMIT, summarizeExamples, confidenceThreshold, validExampleConfidence } from './example-policy.js';
 import { TrainingManager } from './training.js';
 import { SplitProfileStorage, CsvTrainingRepository, trainingFromBrowserProfiles } from './csv-training.js';
 
@@ -54,13 +54,13 @@ const vision = new VisionController($('camera'), $('overlay'), (prediction, capt
   const expected = engine.state === 'running' ? engine.current?.target : vision.target;
   const probability = prediction?.confidenceProbability ?? 0;
   const score = (probability * 100).toFixed(1);
-  $('detected-sign').textContent = !tracked ? 'Nenhuma mão detectada' : label ? `Detectado: ${label}` : 'Nenhum sinal identificado';
-  $('detected-sign').dataset.match = label === expected && probability > .85 ? 'true' : 'false';
-  $('confidence').textContent = !tracked ? 'Mão não detectada · confirmação reiniciada' : prediction?.source === 'dtw' ? motionMessage(prediction) : `Semelhança com os exemplos: ${score}%`;
+  $('detected-sign').textContent = prediction?.state === 'occluded' ? 'Rastreamento em recuperação · início preservado' : !tracked ? 'Nenhuma mão detectada' : label ? `Detectado: ${label}` : 'Nenhum sinal identificado';
+  $('detected-sign').dataset.match = label === expected && validExampleConfidence(probability, expected) ? 'true' : 'false';
+  $('confidence').textContent = prediction?.source === 'dtw' ? motionMessage(prediction) : !tracked ? 'Mão não detectada · confirmação reiniciada' : `Semelhança com os exemplos: ${score}%`;
   if (screen === 'training' && prediction?.alternatives && prediction.source === 'dtw') renderMotionDiagnostics(prediction);
   if (prediction?.source === 'dtw') $('recognition-hint').textContent = label ? `Movimento identificado: ${label}. Mantenha a pose final por 1 segundo.${label !== expected ? ` O alvo é ${expected}.` : ''}` : motionMessage(prediction);
   else if (label && label !== expected) $('recognition-hint').textContent = `A mão se parece mais com ${label}. O alvo continua sendo ${expected}.`;
-  else if (label && probability <= .85) $('recognition-hint').textContent = 'Ainda incerto. Ajuste a posição e a orientação dos dedos. Para gravar exemplos pessoais, volte aos Desafios e abra o Treinamento.';
+  else if (label && !validExampleConfidence(probability, expected)) $('recognition-hint').textContent = 'Ainda incerto. Ajuste a posição e a orientação dos dedos. Para gravar exemplos pessoais, volte aos Desafios e abra o Treinamento.';
   else $('recognition-hint').textContent = screen === 'training' ? 'Repita o sinal selecionado para testar os exemplos gravados.' : engine.state === 'running' ? 'Mantenha a pose por um segundo para confirmar.' : 'O reconhecimento já está ativo. Clique em Iniciar partida quando estiver pronto.';
 }, message => {
   setText('camera-status', message);
@@ -88,11 +88,12 @@ const vision = new VisionController($('camera'), $('overlay'), (prediction, capt
       if (token !== session || profile?.name !== name || screen !== 'training') return;
       profile = store.read(name);
       vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples);
-      if (admission.state === 'pending') $('calibration-status').textContent = 'Primeira execução provisória salva neste perfil. Grave novamente: as duas precisam superar 85% de semelhança entre si. Isso mede repetibilidade, não correção do sinal.';
-      else if (admission.state === 'rejected') $('calibration-status').textContent = `Nenhum exemplo entrou na base. Semelhança: ${(admission.confidence * 100).toFixed(1)}%; precisamos de mais de 85% para ${status.label}.${admission.matchedLabel && admission.matchedLabel !== status.label ? ` A leitura correspondeu a ${admission.matchedLabel}.` : ''}${admission.provisional ? ' A primeira execução provisória foi mantida; repita ou recomece a referência.' : ''}`;
+      if (admission.state === 'pending') $('calibration-status').textContent = `Primeira execução provisória salva neste perfil. Grave novamente: as duas precisam superar ${confidenceThreshold(status.label) * 100}% de semelhança entre si. Isso mede repetibilidade, não correção do sinal.`;
+      else if (admission.state === 'rejected') $('calibration-status').textContent = `Nenhum exemplo entrou na base. ${Number.isFinite(admission.confidence) ? `Escore de comparação: ${formatSimilarity(admission.confidence)}; precisamos de mais de ${confidenceThreshold(status.label) * 100}% e uma correspondência sem ambiguidade para ${status.label}.` : 'Comparação indisponível: referência ausente ou sequência inválida. Recomece a referência.'}${admission.matchedLabel && admission.matchedLabel !== status.label ? ` A classe mais próxima foi ${admission.matchedLabel}.` : ''}${admission.provisional ? ' A primeira execução provisória foi mantida; repita ou recomece a referência.' : ''}`;
       else {
         $('calibration-status').textContent = `${admission.savedCount === 1 ? '1 exemplo salvo' : `${admission.savedCount} exemplos salvos`} em dataset_libras.csv para ${profile.name}. Menor semelhança: ${(admission.confidence * 100).toFixed(1)}%.${admission.comparisonSource === 'repeatability' ? ' A primeira e a segunda execução foram aprovadas: um exemplo de cada captura.' : ''}`;
         if (status.depth?.warnings?.length) $('calibration-status').textContent += ' A variação dos dedos ou da palma foi preservada no exemplo.';
+        if (status.clip?.occlusions?.length) $('calibration-status').textContent += ' Os intervalos de oclusão ficaram registrados no exemplo.';
       }
     } catch (error) {
       if (token === session && profile?.name === name) {
@@ -108,6 +109,9 @@ const vision = new VisionController($('camera'), $('overlay'), (prediction, capt
   } else $('calibration-status').textContent = status.state === 'warmup' ? `Prepare o sinal. A captura começa em ${status.remaining}…` : status.dynamic ? motionMessage(status) : status.state === 'tracking-lost' ? 'Mão não detectada. A captura recomeçará ao enquadrá-la.' : `Mantenha a pose estável… ${Math.round(status.progress * 100)}%`;
   if (status.dynamic) $('confidence').textContent = status.state === 'complete' ? 'Captura concluída. Consulte o resultado no Treinamento.' : $('calibration-status').textContent;
 });
+function formatSimilarity(score) {
+  return score > 0 && score < .0005 ? '<0,1%' : `${(score * 100).toFixed(1)}%`;
+}
 function depthMessage(depth) {
   const reduction = Number.isFinite(depth?.scaleRatio) ? ((1 - depth.scaleRatio) * 100).toFixed(1) : null;
   const messages = {
@@ -123,9 +127,15 @@ function depthMessage(depth) {
 }
 function motionMessage(status) {
   if (status.state === 'confirming') return `Movimento: ${status.targetClass} · semelhança ${(status.confidenceProbability * 100).toFixed(1)}% · mantenha a pose final`;
+  if (status.state === 'tracking-lost') {
+    const reasons = { 'gap-too-long': 'A perda de rastreamento durou demais.', 'position-jump': 'A posição da mão mudou bruscamente.', 'scale-jump': 'O tamanho da mão mudou bruscamente.', 'hand-changed': 'A mão identificada mudou.', 'missing-budget': 'Muitos trechos ficaram sem rastreamento.' };
+    return `${reasons[status.reason] ?? 'Rastreamento interrompido.'} Recomece pela posição inicial.`;
+  }
   const messages = {
     arming: 'Pare brevemente na posição inicial.', ready: 'Pronto: execute o movimento completo.',
     recording: 'Lendo movimento… Pare na posição final para concluir.',
+    occluded: 'Oclusão temporária: início preservado. Continue o movimento dentro do enquadramento.',
+    'low-coverage': 'Uma parte grande do movimento ficou oculta. Recomece mantendo a mão mais visível.',
     'tracking-lost': 'Rastreamento interrompido. Recomece pela posição inicial.',
     'too-long': 'Movimento longo demais. Recomece e conclua em até 4,5 segundos.',
     'too-short': 'Movimento curto demais. Recomece com a trajetória completa.',
@@ -141,6 +151,8 @@ function showMotionState(status) {
   document.body.dataset.capturing = String(capturing);
   const labels = { 'camera-off': 'CÂMERA DESLIGADA', warmup: `PREPARE-SE · ${status.remaining ?? 2}`, collecting: 'CAPTURANDO POSE', arming: 'POSIÇÃO INICIAL', ready: 'PRONTO · MOVA', recording: capturing ? 'GRAVANDO EXEMPLO' : 'LENDO MOVIMENTO', confirming: 'RECONHECIDO', rejected: 'NÃO RECONHECIDO', complete: 'CAPTURA CONCLUÍDA', 'tracking-lost': 'MÃO NÃO VISÍVEL', 'too-short': 'MOVIMENTO CURTO', 'too-long': 'MOVIMENTO LONGO', restart: 'RECOMECE' };
   labels['depth-required'] = 'REFAÇA O RECUO';
+  labels.occluded = 'OCLUSÃO TEMPORÁRIA';
+  labels['low-coverage'] = 'POUCA VISIBILIDADE';
   const active = screen === 'training' || (screen === 'game' && DYNAMIC_CLASSES.has(vision.target));
   $('motion-indicator').hidden = !active;
   $('motion-cue').hidden = !active || state === 'camera-off';
@@ -173,7 +185,7 @@ function renderMotionDiagnostics(prediction) {
     }
     $('motion-distances').append(row);
   }
-  $('motion-diagnostic-status').textContent = prediction.reason === 'depth-required' && prediction.source !== 'dtw' ? 'Captura de X recusada pela análise do recuo.' : prediction.reason === 'no-examples' ? 'Ainda não há exemplos para comparação.' : `Última sequência: ${prediction.targetClass ?? 'não reconhecida'} · escore ${((prediction.similarityScore ?? 0) * 100).toFixed(1)}%. Menor distância indica maior semelhança. Capturas são comparadas antes de serem adicionadas à base.`;
+  $('motion-diagnostic-status').textContent = prediction.reason === 'depth-required' && prediction.source !== 'dtw' ? 'Captura de X recusada pela análise do recuo.' : prediction.reason === 'no-examples' ? 'Ainda não há exemplos para comparação.' : !Number.isFinite(prediction.similarityScore) ? 'Comparação indisponível: sequência inválida ou incompleta.' : `Última sequência: ${prediction.targetClass ?? 'não reconhecida'} · escore ${formatSimilarity(prediction.similarityScore)}. Menor distância indica maior semelhança. Capturas são comparadas antes de serem adicionadas à base.`;
   if (Number.isFinite(prediction.depth?.scaleRatio)) $('motion-diagnostic-status').textContent += ` Variação aparente da palma: ${((prediction.depth.scaleRatio - 1) * 100).toFixed(0)}% · recuo ${prediction.depth.eligible ? 'compatível' : 'não confirmado'}.`;
   if (prediction.reason === 'depth-required') $('motion-diagnostic-status').textContent += ` Motivo: ${depthMessage(prediction.depth)}`;
   if (prediction.depth?.warnings?.length) $('motion-diagnostic-status').textContent += ` Aviso de qualidade: variação de pose em ${(prediction.depth.poseVariationFraction * 100).toFixed(0)}% das amostras e proporções da palma inconsistentes em ${(prediction.depth.palmIncoherenceFraction * 100).toFixed(0)}%. Esses avisos não bloqueiam o cadastro; a execução será comparada aos exemplos pelo DTW.`;
@@ -310,7 +322,7 @@ function renderTarget() {
   $('sequence-progress').max = sequence.length; $('sequence-progress').value = engine.index;
   const dynamic = DYNAMIC_CLASSES.has(step.target);
   $('practice-title').textContent = dynamic ? `Explore o movimento de ${step.target}.` : `Vamos praticar ${step.target}?`;
-  $('practice-instruction').textContent = simulated ? 'A câmera reconhece normalmente. Para testar a engine, você também pode manter a injeção manual por 1 segundo.' : dynamic ? 'Espere PRONTO na câmera, execute o movimento completo e mantenha a pose final por 1 segundo. A detecção ainda é experimental.' : vision.classifier.hasClass(step.target) ? 'Mostre uma mão inteira e reproduza o sinal. Mantenha a semelhança acima de 85% por um segundo.' : `Não há exemplos de ${step.target} no dataset. Volte aos Desafios e abra o Treinamento para salvar exemplos pessoais.`;
+  $('practice-instruction').textContent = simulated ? 'A câmera reconhece normalmente. Para testar a engine, você também pode manter a injeção manual por 1 segundo.' : dynamic ? `Espere PRONTO na câmera, execute o movimento completo e mantenha a pose final com escore acima de ${confidenceThreshold(step.target) * 100}% por 1 segundo. A detecção ainda é experimental.` : vision.classifier.hasClass(step.target) ? 'Mostre uma mão inteira e reproduza o sinal. Mantenha a semelhança acima de 85% por um segundo.' : `Não há exemplos de ${step.target} no dataset. Volte aos Desafios e abra o Treinamento para salvar exemplos pessoais.`;
   $('motion-indicator').hidden = !dynamic;
   $('motion-cue').hidden = !dynamic;
   if (dynamic) showMotionState({ state: 'arming' });
@@ -337,7 +349,7 @@ function renderReference() {
   $('motion-tools').hidden = !temporal;
   $('motion-guide').hidden = !temporal;
   const records = (temporal ? profile?.motionExamples?.[label] : profile?.signExamples?.[label]) ?? [];
-  const summary = summarizeExamples(records);
+  const summary = summarizeExamples(records, label);
   $('personal-count').textContent = `${summary.total} de ${EXAMPLE_LIMIT} exemplos salvos para ${label === 'UNKNOWN' ? 'rejeição' : label}.`;
   if (label === 'X') {
     const usable = vision.dynamic.classifier.examples.X.length;
@@ -345,7 +357,7 @@ function renderReference() {
     $('personal-count').textContent += ` ${usable} disponíveis para reconhecimento.${saved > usable ? ` ${saved - usable} anteriores precisam ser regravados com a leitura de profundidade.` : ''}`;
   }
   $('training-buckets').textContent = Object.entries(summary.buckets).map(([range, bucket]) => `${range}%: ${bucket.protected}/2 âncoras (${bucket.count} exemplos)`).join(' · ');
-  $('training-retention').textContent = `Ao atingir 30, sai o mais antigo que preserve até dois exemplos por faixa.${summary.unscored ? ` ${summary.unscored} exemplos antigos sem escore foram preservados e não contam como âncoras.` : ''} Faixas incompletas aguardam exemplos; os escores não são alterados para preenchê-las.`;
+  $('training-retention').textContent = `Mínimo para ${label}: mais de ${confidenceThreshold(label) * 100}%. Até 6 dos 30 exemplos (20%) são protegidos: dois por faixa. Ao atingir 30, sai o mais antigo que preserve essa cota.${summary.unscored ? ` ${summary.unscored} exemplos antigos sem escore foram preservados e não contam como âncoras.` : ''} As faixas excluem o limite inferior e incluem o superior. Faixas incompletas aguardam exemplos; os escores não são alterados para preenchê-las.`;
   const pending = profile?.pendingExamples?.[label];
   $('training-pending').hidden = !pending;
   $('training-pending').textContent = 'Há uma primeira execução provisória salva. Grave a segunda para comparar; ela ainda não participa do reconhecimento.';

@@ -10,15 +10,15 @@ const validStaticLabel = label => /^[A-Z0-9]$/.test(label) && !DYNAMIC_CLASSES.h
 const validTrainingLabel = label => validStaticLabel(label) || MOTION_LABELS.includes(label);
 const validStoredVector = vector => Array.isArray(vector) && vector.length === 63 && vector.every(value => Number.isFinite(value) && Math.abs(value) <= 20);
 const legacyStaticExample = example => validStoredVector(example) && !Object.hasOwn(example, 'confidenceProbability');
-const validExampleMetadata = example => isRecord(example) && validExampleConfidence(example.confidenceProbability) && Number.isFinite(example.capturedAt) && example.capturedAt >= 0 && ['reference', 'repeatability'].includes(example.comparisonSource);
-const approvedStaticExample = example => validExampleMetadata(example) && validStoredVector(example.features);
-const approvedMotionExample = example => validExampleMetadata(example) && validMotionClip(example);
+const validExampleMetadata = (example, label) => isRecord(example) && validExampleConfidence(example.confidenceProbability, label) && Number.isFinite(example.capturedAt) && example.capturedAt >= 0 && ['reference', 'repeatability'].includes(example.comparisonSource);
+const approvedStaticExample = (example, label) => validExampleMetadata(example, label) && validStoredVector(example.features);
+const approvedMotionExample = (example, label) => validExampleMetadata(example, label) && validMotionClip(example);
 const legacyMotionExample = example => validMotionClip(example) && !Object.hasOwn(example, 'confidenceProbability');
-const storedStaticExample = example => legacyStaticExample(example) || approvedStaticExample(example);
-const storedMotionExample = example => legacyMotionExample(example) || approvedMotionExample(example);
+const storedStaticExample = (example, label) => legacyStaticExample(example) || approvedStaticExample(example, label);
+const storedMotionExample = (example, label) => legacyMotionExample(example) || approvedMotionExample(example, label);
 const copyExampleMetadata = example => ({ confidenceProbability: example.confidenceProbability, capturedAt: example.capturedAt, comparisonSource: example.comparisonSource });
 const copyStaticExample = example => Array.isArray(example) ? [...example] : { features: [...example.features], ...copyExampleMetadata(example) };
-const copyMotionExample = example => ({ version: example.version, durationMs: example.durationMs, frames: example.frames.map(frame => [...frame]), ...(Object.hasOwn(example, 'confidenceProbability') ? copyExampleMetadata(example) : {}) });
+const copyMotionExample = example => ({ version: example.version, durationMs: example.durationMs, frames: example.frames.map(frame => [...frame]), ...(example.occlusions ? { occlusions: example.occlusions.map(gap => ({ ...gap })) } : {}), ...(Object.hasOwn(example, 'confidenceProbability') ? copyExampleMetadata(example) : {}) });
 
 function validPendingExample(label, pending, requireCreatedAt = true) {
   return isRecord(pending) && (!requireCreatedAt || (Number.isFinite(pending.createdAt) && pending.createdAt >= 0)) && (pending.kind === 'static'
@@ -30,7 +30,7 @@ const copyPendingExample = pending => pending.kind === 'static'
   : { kind: 'motion', clip: copyMotionExample(pending.clip), createdAt: pending.createdAt };
 
 function validateTrainingBank(bank, labelValidator, exampleValidator) {
-  if (!isRecord(bank) || Object.entries(bank).some(([label, examples]) => !labelValidator(label) || !Array.isArray(examples) || examples.length > EXAMPLE_LIMIT || !examples.every(exampleValidator))) throw new Error('Coleção de exemplos inválida; novos registros precisam de semelhança maior que 85% e metadados válidos.');
+  if (!isRecord(bank) || Object.entries(bank).some(([label, examples]) => !labelValidator(label) || !Array.isArray(examples) || examples.length > EXAMPLE_LIMIT || !examples.every(example => exampleValidator(example, label)))) throw new Error('Coleção de exemplos inválida; novos registros precisam superar o limite da classe (75% para J; 85% para as demais) e ter metadados válidos.');
 }
 
 /** Restore optional explicit FIFO order without trusting client timestamps. */
@@ -99,11 +99,11 @@ export class ProfileStore {
     return profile;
   }
   saveExamples(name, label, records) {
-    if (!validStaticLabel(label) || !Array.isArray(records) || !records.length || records.length > EXAMPLE_LIMIT || !records.every(approvedStaticExample)) throw new Error('Exemplos inválidos: a semelhança deve ser maior que 85%, com origem e instante da avaliação.');
+    if (!validStaticLabel(label) || !Array.isArray(records) || !records.length || records.length > EXAMPLE_LIMIT || !records.every(example => approvedStaticExample(example, label))) throw new Error('Exemplos inválidos: a semelhança deve ser maior que 85%, com origem e instante da avaliação.');
     const profile = this.requireProfile(name);
     if (!isRecord(profile.signExamples)) profile.signExamples = {};
-    const previous = Array.isArray(profile.signExamples[label]) ? profile.signExamples[label].filter(storedStaticExample) : [];
-    profile.signExamples[label] = retainExamples(previous, records.map(copyStaticExample));
+    const previous = Array.isArray(profile.signExamples[label]) ? profile.signExamples[label].filter(example => storedStaticExample(example, label)) : [];
+    profile.signExamples[label] = retainExamples(previous, records.map(copyStaticExample), label);
     if (isRecord(profile.pendingExamples)) delete profile.pendingExamples[label];
     this.write(profile);
     return profile;
@@ -119,17 +119,17 @@ export class ProfileStore {
   }
   saveMotion(name, label, clip) { return this.saveMotions(name, label, [clip]); }
   saveMotions(name, label, clips) {
-    if (!MOTION_LABELS.includes(label) || !Array.isArray(clips) || !clips.length || clips.length > EXAMPLE_LIMIT || !clips.every(approvedMotionExample)) throw new Error('Movimentos inválidos: a semelhança deve ser maior que 85%, com origem e instante da avaliação.');
+    if (!MOTION_LABELS.includes(label) || !Array.isArray(clips) || !clips.length || clips.length > EXAMPLE_LIMIT || !clips.every(clip => approvedMotionExample(clip, label))) throw new Error('Movimentos inválidos: supere o limite da classe (75% para J; 85% para as demais), com origem e instante da avaliação.');
     return this.importMotion(name, { version: MOTION_VERSION, examples: { [label]: clips } });
   }
   importMotion(name, payload) {
     if (![1, MOTION_VERSION].includes(payload?.version) || !isRecord(payload.examples) || !Object.keys(payload.examples).length) throw new Error('Arquivo de movimentos inválido ou de versão incompatível.');
-    validateTrainingBank(payload.examples, label => MOTION_LABELS.includes(label), clip => approvedMotionExample(clip) && clip.version <= payload.version);
+    validateTrainingBank(payload.examples, label => MOTION_LABELS.includes(label), (clip, label) => approvedMotionExample(clip, label) && clip.version <= payload.version);
     const profile = this.requireProfile(name);
     if (!isRecord(profile.motionExamples)) profile.motionExamples = {};
     for (const [label, clips] of Object.entries(payload.examples)) {
-      const previous = Array.isArray(profile.motionExamples[label]) ? profile.motionExamples[label].filter(storedMotionExample) : [];
-      profile.motionExamples[label] = retainExamples(previous, clips.map(copyMotionExample));
+      const previous = Array.isArray(profile.motionExamples[label]) ? profile.motionExamples[label].filter(example => storedMotionExample(example, label)) : [];
+      profile.motionExamples[label] = retainExamples(previous, clips.map(copyMotionExample), label);
       if (clips.length && isRecord(profile.pendingExamples)) delete profile.pendingExamples[label];
     }
     this.write(profile);
@@ -163,10 +163,10 @@ export class ProfileStore {
     for (const [bank, isValid, clone, isApproved] of [['signExamples', storedStaticExample, copyStaticExample, approvedStaticExample], ['motionExamples', storedMotionExample, copyMotionExample, approvedMotionExample]]) {
       for (const [label, examples] of Object.entries(profile[bank] ?? {})) {
         if (!(bank === 'signExamples' ? validStaticLabel(label) : MOTION_LABELS.includes(label)) || !Array.isArray(examples)) continue;
-        const valid = retainExamples(examples.filter(isValid), []);
-        backup[bank][label] = valid.filter(isApproved).map(clone);
-        backup.legacyReferences[bank][label] = valid.filter(example => !isApproved(example)).map(clone);
-        backup.exampleOrder[bank][label] = valid.map(example => isApproved(example) ? 'approved' : 'legacy');
+        const valid = retainExamples(examples.filter(example => isValid(example, label)), [], label);
+        backup[bank][label] = valid.filter(example => isApproved(example, label)).map(clone);
+        backup.legacyReferences[bank][label] = valid.filter(example => !isApproved(example, label)).map(clone);
+        backup.exampleOrder[bank][label] = valid.map(example => isApproved(example, label) ? 'approved' : 'legacy');
       }
     }
     for (const [label, pending] of Object.entries(profile.pendingExamples ?? {})) if (validPendingExample(label, pending)) backup.pendingExamples[label] = copyPendingExample(pending);
@@ -194,10 +194,10 @@ export class ProfileStore {
         const approved = incoming[label] ?? [], unscored = previousLegacy[label] ?? [];
         if (approved.length + unscored.length > EXAMPLE_LIMIT) throw new Error('O backup excede 30 exemplos na mesma classe.');
         const ordered = restoreExampleOrder(approved, unscored, order[bank]?.[label]);
-        let retained = Array.isArray(profile[bank][label]) ? profile[bank][label].filter(isValid) : [];
+        let retained = Array.isArray(profile[bank][label]) ? profile[bank][label].filter(example => isValid(example, label)) : [];
         for (const example of ordered) {
           const copy = clone(example);
-          retained = validExampleConfidence(copy?.confidenceProbability) ? retainExamples(retained, [copy]) : retainExamples([...retained, copy], []);
+          retained = validExampleConfidence(copy?.confidenceProbability, label) ? retainExamples(retained, [copy], label) : retainExamples([...retained, copy], [], label);
         }
         profile[bank][label] = retained;
         if (approved.length && isRecord(profile.pendingExamples)) delete profile.pendingExamples[label];

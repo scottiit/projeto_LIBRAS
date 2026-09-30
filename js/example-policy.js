@@ -1,26 +1,29 @@
 /** Maximum stored examples for one class within one profile. */
 export const EXAMPLE_LIMIT = 30;
 
-/** The lower boundary is exclusive: 0.85 itself cannot be saved. */
+/** Default lower boundary; each class uses the same policy in every layer. */
 export const MIN_EXAMPLE_CONFIDENCE = 0.85;
+export const confidenceThreshold = label => label === 'J' ? .75 : MIN_EXAMPLE_CONFIDENCE;
 
-const BUCKET_NAMES = ['85-90', '90-95', '95-100'];
+const DEFAULT_BUCKETS = [{ name: '85-90', upper: .9 }, { name: '90-95', upper: .95 }, { name: '95-100', upper: 1 }];
+// Exact rational boundaries split (3/4, 1] into three equal-width bands.
+const J_BUCKETS = [{ name: '75-83⅓', upper: 5 / 6 }, { name: '83⅓-91⅔', upper: 11 / 12 }, { name: '91⅔-100', upper: 1 }];
+const confidenceBands = label => label === 'J' ? J_BUCKETS : DEFAULT_BUCKETS;
 const MIN_BUCKET_EXAMPLES = 2;
 
 /** Reject missing, coerced, non-finite and out-of-range similarity scores. */
-export function validExampleConfidence(value) {
-  return Number.isFinite(value) && value > MIN_EXAMPLE_CONFIDENCE && value <= 1;
+export function validExampleConfidence(value, label) {
+  return Number.isFinite(value) && value > confidenceThreshold(label) && value <= 1;
 }
 
 /**
  * Return the disjoint similarity band, or null for an unscored legacy record.
- * Bands are (0.85, 0.90], (0.90, 0.95] and (0.95, 1.00].
+ * Bands are lower-exclusive and upper-inclusive; J uses three equal thirds
+ * of (.75, 1]. Other classes retain (.85, .90], (.90, .95], (.95, 1].
  */
-export function confidenceBucket(value) {
-  if (!validExampleConfidence(value)) return null;
-  if (value <= 0.90) return '85-90';
-  if (value <= 0.95) return '90-95';
-  return '95-100';
+export function confidenceBucket(value, label) {
+  if (!validExampleConfidence(value, label)) return null;
+  return confidenceBands(label).find(band => value <= band.upper).name;
 }
 
 /**
@@ -32,14 +35,14 @@ export function confidenceBucket(value) {
  * @returns {{ total: number, unscored: number, buckets: Object<string,
  *   { count: number, protected: number, missing: number }> }}
  */
-export function summarizeExamples(records) {
+export function summarizeExamples(records, label) {
   if (!Array.isArray(records)) throw new TypeError('Examples must be an array.');
-  const buckets = Object.fromEntries(BUCKET_NAMES.map(name => [name, {
+  const buckets = Object.fromEntries(confidenceBands(label).map(({ name }) => [name, {
     count: 0, protected: 0, missing: MIN_BUCKET_EXAMPLES,
   }]));
   let unscored = 0;
   for (const record of records) {
-    const bucket = confidenceBucket(record?.confidenceProbability);
+    const bucket = confidenceBucket(record?.confidenceProbability, label);
     if (bucket) buckets[bucket].count++;
     else unscored++;
   }
@@ -67,23 +70,24 @@ export function summarizeExamples(records) {
  * @param {Array<object>} previous Previously stored examples for one class.
  * @param {object|Array<object>} incoming One example or an ordered batch.
  * @returns {Array<object>} The retained examples, oldest insertion first.
- * @throws {RangeError} If any incoming confidence is not finite and in (.85, 1].
+ * @param {string} [label] Class whose acceptance threshold and bands apply.
+ * @throws {RangeError} If any incoming confidence fails its class threshold.
  */
-export function retainExamples(previous, incoming) {
+export function retainExamples(previous, incoming, label) {
   if (!Array.isArray(previous)) throw new TypeError('Previous examples must be an array.');
   const batch = Array.isArray(incoming) ? incoming : [incoming];
   for (const example of batch) {
-    if (!validExampleConfidence(example?.confidenceProbability)) {
-      throw new RangeError('Example confidenceProbability must be greater than 0.85 and at most 1.');
+    if (!validExampleConfidence(example?.confidenceProbability, label)) {
+      throw new RangeError(`Example confidenceProbability must be greater than ${confidenceThreshold(label)} and at most 1.`);
     }
   }
 
   const retained = [...previous];
   const trimOverflow = () => {
     while (retained.length > EXAMPLE_LIMIT) {
-      const { buckets } = summarizeExamples(retained);
+      const { buckets } = summarizeExamples(retained, label);
       const removableIndex = retained.findIndex(example => {
-        const bucket = confidenceBucket(example?.confidenceProbability);
+        const bucket = confidenceBucket(example?.confidenceProbability, label);
         return bucket === null || buckets[bucket].count > MIN_BUCKET_EXAMPLES;
       });
       // Only six representatives can be protected, so overflow above 30 must

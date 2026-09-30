@@ -1,6 +1,11 @@
 // Single registry shared by inference, calibration, storage and dataset export.
 export const DYNAMIC_CLASSES = new Set(['H', 'J', 'K', 'X', 'Z']);
-export const isValidHand = hand => Array.isArray(hand) && hand.length === 21 && hand.every(point => point && ['x', 'y', 'z'].every(axis => Number.isFinite(point[axis])));
+export const isValidHand = hand => {
+  if (!Array.isArray(hand) || hand.length !== 21) return false;
+  // Unlike Array.every, for..of also visits absent array slots.
+  for (const point of hand) if (!point || !['x', 'y', 'z'].every(axis => Number.isFinite(point[axis]))) return false;
+  return true;
+};
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const delta = (a, b) => ({ x: b.x - a.x, y: b.y - a.y, z: b.z - a.z });
 const scale = hand => Math.max(0.025, distance(hand[0], hand[9]));

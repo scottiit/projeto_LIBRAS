@@ -1,13 +1,18 @@
 import { isValidHand, DYNAMIC_CLASSES } from './trajectory.js';
 import { normalizeHand, featureDistance } from './classifier.js';
 import { apparentPalmSize, coherentPalmScale, depthRetreat, DEPTH_WEIGHT, DEPTH_AXIS } from './depth.js';
-import { EXAMPLE_LIMIT } from './example-policy.js';
+import { EXAMPLE_LIMIT, confidenceThreshold } from './example-policy.js';
 
 export const MOTION_VERSION = 2;
 export const MOTION_LABELS = [...DYNAMIC_CLASSES, 'UNKNOWN'];
 export const MOTION_LIMIT = EXAMPLE_LIMIT;
 const MOTION_SAMPLES = 32;
 const MOTION_GAP = 180;
+// Older saved clips may contain gaps from the retired J policy. Keep the
+// storage format readable; new captures use the generic MOTION_GAP limit.
+const LEGACY_OCCLUSION_MS = 600;
+const MISSING_BUDGET = 700;
+const MIN_OBSERVED_FRACTION = .7;
 const motionClamp = value => Math.max(0, Math.min(1, value));
 
 /** Coordinates in image-height units. Mirror X as on screen, then canonicalize
@@ -36,7 +41,7 @@ function scaleMotion(a, b) {
 }
 function motionDifference(a, b) {
   const palm = (a.palm + b.palm) / 2;
-  return Math.hypot(featureDistance(a.pose, b.pose), .55 * Math.hypot(a.wrist[0] - b.wrist[0], a.wrist[1] - b.wrist[1]) / palm, DEPTH_WEIGHT * scaleMotion(a, b));
+  return Math.hypot(featureDistance(a.pose, b.pose), .55 * Math.hypot(a.wrist[0] - b.wrist[0], a.wrist[1] - b.wrist[1]) / palm);
 }
 function temporalCost(a, b, includeDepth = true) {
   // Legacy clips contain no scale history: never invent a zero-depth trajectory.
@@ -44,11 +49,23 @@ function temporalCost(a, b, includeDepth = true) {
   return Math.hypot(featureDistance(a, b), .55 * Math.hypot(a[63] - b[63], a[64] - b[64]), depth);
 }
 
+function validOcclusions(clip) {
+  if (clip.occlusions === undefined) return true;
+  if (!Array.isArray(clip.occlusions) || clip.occlusions.length > 8) return false;
+  let total = 0, previousEnd = -1;
+  for (const gap of clip.occlusions) {
+    if (!gap || !Number.isFinite(gap.startMs) || !Number.isFinite(gap.endMs) || gap.startMs < 0 || gap.startMs < previousEnd || gap.endMs <= gap.startMs || gap.endMs > clip.durationMs || gap.endMs - gap.startMs > LEGACY_OCCLUSION_MS) return false;
+    total += gap.endMs - gap.startMs;
+    previousEnd = gap.endMs;
+  }
+  return total <= MISSING_BUDGET && total <= clip.durationMs * (1 - MIN_OBSERVED_FRACTION);
+}
+
 /** Strict, bounded schema for CSV training records and JSON imports. */
 export function validMotionClip(clip) {
   return Boolean(clip && [1, MOTION_VERSION].includes(clip.version) && Number.isFinite(clip.durationMs) && clip.durationMs >= 250 && clip.durationMs <= 4500 &&
-    Array.isArray(clip.frames) && clip.frames.length === MOTION_SAMPLES && clip.frames.every(frame => Array.isArray(frame) && frame.length === (clip.version === 1 ? 65 : 66) && frame.every(value => Number.isFinite(value) && Math.abs(value) <= 20)) &&
-    clip.frames[0][63] === 0 && clip.frames[0][64] === 0 && (clip.version === 1 || clip.frames[0][DEPTH_AXIS] === 0) && (motionExtent(clip) >= .16 || (clip.version === 2 && inspectDepthRetreat(clip).eligible)));
+    Array.isArray(clip.frames) && clip.frames.length === MOTION_SAMPLES && Array.from(clip.frames).every(frame => Array.isArray(frame) && frame.length === (clip.version === 1 ? 65 : 66) && Array.from(frame).every(value => Number.isFinite(value) && Math.abs(value) <= 20)) &&
+    clip.frames[0][63] === 0 && clip.frames[0][64] === 0 && (clip.version === 1 || clip.frames[0][DEPTH_AXIS] === 0) && validOcclusions(clip) && (motionExtent(clip) >= .16 || (clip.version === 2 && inspectDepthRetreat(clip).eligible)));
 }
 export const inspectDepthRetreat = clip => depthRetreat(clip, featureDistance);
 export const usableMotionClip = (label, clip) => validMotionClip(clip) && (label !== 'X' || inspectDepthRetreat(clip).eligible);
@@ -60,7 +77,7 @@ function motionExtent(clip) {
  * the path that per-frame recentering alone would destroy (especially J/Z).
  * Fixed 32 samples bound storage and DTW work independently of camera FPS.
  */
-function encodeMotion(frames) {
+function encodeMotion(frames, occlusions = []) {
   const first = frames[0], last = frames.at(-1);
   const durationMs = last.time - first.time;
   const values = frames.map(frame => [...frame.pose, (frame.wrist[0] - first.wrist[0]) / first.palm, (frame.wrist[1] - first.wrist[1]) / first.palm, Math.log(first.apparentSize / frame.apparentSize)]);
@@ -72,6 +89,9 @@ function encodeMotion(frames) {
     return values[cursor].map((value, axis) => value + fraction * (values[cursor + 1][axis] - value));
   });
   const clip = { version: MOTION_VERSION, durationMs, frames: sampled };
+  // Interpolation bridges a bounded gap only after coherent reacquisition.
+  // Explicit intervals retain that uncertainty in CSV and exported examples.
+  if (occlusions.length) clip.occlusions = occlusions.map(gap => ({ startMs: gap.start - first.time, endMs: gap.end - first.time }));
   return validMotionClip(clip) ? clip : null;
 }
 
@@ -116,7 +136,7 @@ export class MotionClassifier {
     if (!validMotionClip(clip)) return result;
     const depth = inspectDepthRetreat(clip);
     const alternatives = MOTION_LABELS.filter(label => this.hasClass(label)).map(label => {
-      // Preserve the validated pose/XY metric for H/J/K/Z. X and new rejection
+      // H/J/K/Z share the same full-pose/XY metric. X and rejection
       // examples also compare retreat; old non-X examples remain usable as-is.
       const includeDepth = label === 'X' || label === 'UNKNOWN';
       const distances = this.examples[label].map(example => {
@@ -128,31 +148,73 @@ export class MotionClassifier {
       return { label, distance: Math.min(...distances) };
     }).sort((a, b) => a.distance - b.distance);
     if (!alternatives.length) return { ...result, depth, reason: 'no-examples' };
+    if (alternatives.some(item => !Number.isFinite(item.distance))) return { ...result, depth, reason: 'invalid-comparison' };
     const [best, second] = alternatives;
     const similarity = Math.exp(-.5 * (best.distance / .22) ** 2);
     const separation = second ? motionClamp((second.distance - best.distance) / .12) : 1;
     const score = Math.min(similarity, .5 + .5 * separation);
     const needsDepth = best.label === 'X' && !depth.eligible;
-    const accepted = best.label !== 'UNKNOWN' && !needsDepth && score > .85;
+    const accepted = best.label !== 'UNKNOWN' && !needsDepth && score > confidenceThreshold(best.label);
     return { ...result, targetClass: accepted ? best.label : null, confidenceProbability: accepted ? score : 0, similarityScore: score, alternatives, depth, reason: accepted ? 'matched' : best.label === 'UNKNOWN' ? 'negative' : needsDepth ? 'depth-required' : 'uncertain' };
   }
 }
 
-/** Online segmentation: stable start -> motion -> stable end. Both recording
- * and live recognition use this same state machine. Tracking gaps, hand switches,
- * aspect changes and jumps invalidate the ENTIRE unfinished movement. No interpolation
- * bridges missing tracking. History has a 4.5 s time limit AND a 160-frame cap.
+/** Stable start -> motion -> stable end, shared by capture and recognition.
+ * No label or finger-specific policy: J follows exactly the same path as Z.
+ * Missing frames pause collection for at most 180 ms since the last valid
+ * observation. Reacquisition requires the same handedness and coherent pose/XY.
+ * Gaps remain explicit, bounded to 700 ms total and <=30% of the saved duration.
+ * Missing/outlier frames never enter history or the final-pose dwell timer.
  */
 export class MotionSegmenter {
   constructor() { this.reset(); }
-  reset() { this.state = 'arming'; this.anchor = null; this.last = null; this.frames = []; this.preRoll = []; this.stillSince = null; }
+  reset() {
+    this.state = 'arming'; this.anchor = null; this.last = null;
+    this.frames = []; this.preRoll = []; this.stillSince = null;
+    this.lastInputTime = null; this.occluded = false;
+    this.occlusions = []; this.missingMs = 0;
+  }
+  stop(reason) { this.reset(); return { state: 'tracking-lost', reason }; }
+  interrupt(time, reason) {
+    const gap = this.last ? time - this.last.time : Infinity;
+    if (['ready', 'recording'].includes(this.state) && gap <= MOTION_GAP && this.missingMs + gap <= MISSING_BUDGET && this.occlusions.length < 8) {
+      this.occluded = true;
+      return { state: 'occluded', reason, gapMs: gap, remainingMs: MOTION_GAP - gap };
+    }
+    return this.stop(gap > MOTION_GAP ? 'gap-too-long' : reason);
+  }
   observe(hand, time, handedness, aspectRatio = 1) {
+    if (!Number.isFinite(time) || (this.lastInputTime !== null && time <= this.lastInputTime)) return this.stop('invalid-time');
+    this.lastInputTime = time;
+    if (this.frames.length && time - this.frames[0].time > 4500) { this.reset(); return { state: 'too-long' }; }
+    if (this.last && aspectRatio !== this.last.aspectRatio) return this.stop('camera-changed');
     const frame = motionFrame(hand, time, handedness, aspectRatio);
-    if (!frame) { this.reset(); return { state: 'tracking-lost' }; }
-    // Reject a sudden >~11% size change between observations. Otherwise linear
-    // resampling could turn ONE tracker/zoom jump into many smooth fake samples.
-    const broken = this.last && (time <= this.last.time || time - this.last.time > MOTION_GAP || handedness !== this.last.handedness || aspectRatio !== this.last.aspectRatio || motionDifference(this.last, frame) > 2 || Math.abs(scaleMotion(this.last, frame)) > .12);
-    if (broken) { this.reset(); return { state: 'tracking-lost' }; }
+    if (!frame) return this.interrupt(time, 'missing-landmarks');
+    const gap = this.last ? time - this.last.time : 0;
+    const recovering = Boolean(this.last && this.occluded);
+    if (this.last) {
+      if (gap > MOTION_GAP) return this.stop('gap-too-long');
+      if (frame.handedness !== this.last.handedness) return this.stop('hand-changed');
+      // Scale is recorded for X, but never a global veto on rotating J/H/Z.
+      // X's own completed-clip gate rejects discontinuous or implausible retreat.
+      if (motionDifference(this.last, frame) > 2) return this.stop('position-jump');
+    }
+    if (recovering) {
+      if (this.missingMs + gap > MISSING_BUDGET || this.occlusions.length >= 8) return this.stop('missing-budget');
+      // Keep the initial pose before an occlusion at the first movement. If the
+      // same pose simply reappears, require preparation again instead of
+      // manufacturing motion from disappearance alone.
+      if (this.state === 'ready') {
+        if (motionDifference(this.anchor, frame) <= .12 && Math.abs(scaleMotion(this.anchor, frame)) <= .055) { this.reset(); return { state: 'arming' }; }
+        this.frames = [...this.preRoll, frame];
+        this.state = 'recording';
+      }
+      this.occlusions.push({ start: this.last.time, end: time });
+      this.missingMs += gap;
+      this.anchor = frame;
+      this.stillSince = time;
+    }
+    this.occluded = false;
     this.last = frame;
     if (!this.anchor) this.anchor = frame;
     if (this.state === 'arming') {
@@ -174,9 +236,11 @@ export class MotionSegmenter {
     if (time - this.stillSince < 300) return { state: 'recording', durationMs: time - this.frames[0].time };
     // Keep only 100 ms of the final pause: its length is not part of the sign.
     const trimmed = this.frames.filter(item => item.time <= this.stillSince + 100);
-    const clip = trimmed.length >= 4 ? encodeMotion(trimmed) : null;
+    const duration = trimmed.length ? trimmed.at(-1).time - trimmed[0].time : 0;
+    const enoughVisible = duration > 0 && this.missingMs <= duration * (1 - MIN_OBSERVED_FRACTION);
+    const clip = trimmed.length >= 4 && enoughVisible ? encodeMotion(trimmed, this.occlusions) : null;
     this.reset();
-    return clip ? { state: 'complete', clip, terminal: frame } : { state: 'too-short' };
+    return clip ? { state: 'complete', clip, terminal: frame } : { state: enoughVisible ? 'too-short' : 'low-coverage' };
   }
 }
 
@@ -208,20 +272,23 @@ export class TemporalRecognizer {
   setExamples(examples) { this.classifier.setExamples(examples); this.reset(); }
   reset() { this.segmenter = new MotionSegmenter(); this.evidence = null; this.lastTime = null; this.feedback = null; }
   predict(hand, time, handedness, aspectRatio = 1) {
-    const empty = state => ({ targetClass: null, confidenceProbability: 0, timestamp: Date.now(), source: 'dtw', state });
-    const frame = motionFrame(hand, time, handedness, aspectRatio);
-    if (!frame || (this.lastTime !== null && (time <= this.lastTime || time - this.lastTime > MOTION_GAP))) { this.reset(); return empty('tracking-lost'); }
+    const empty = (state, detail = {}) => ({ ...detail, targetClass: null, confidenceProbability: 0, timestamp: Date.now(), source: 'dtw', state });
+    if (!Number.isFinite(time) || (this.lastTime !== null && time <= this.lastTime)) { this.reset(); return empty('tracking-lost', { reason: 'invalid-time' }); }
+    const previousTime = this.lastTime;
     this.lastTime = time;
     if (this.evidence) {
       const { terminal, prediction } = this.evidence;
-      if (handedness === terminal.handedness && aspectRatio === terminal.aspectRatio && time - terminal.time <= 1800 && motionDifference(terminal, frame) <= .1) return { ...prediction, timestamp: Date.now(), state: 'confirming' };
+      const frame = motionFrame(hand, time, handedness, aspectRatio);
+      // The final 1 s confirmation NEVER inherits occlusion grace.
+      if (!frame || (previousTime !== null && time - previousTime > MOTION_GAP)) { this.reset(); return empty('tracking-lost'); }
+      if (frame.handedness === terminal.handedness && aspectRatio === terminal.aspectRatio && time - terminal.time <= 1800 && motionDifference(terminal, frame) <= .1) return { ...prediction, timestamp: Date.now(), state: 'confirming' };
       this.reset(); return empty('restart');
     }
     const status = this.segmenter.observe(hand, time, handedness, aspectRatio);
     if (status.state !== 'complete') {
       if (this.feedback && time < this.feedback.until && ['arming', 'ready'].includes(status.state)) return { ...this.feedback.prediction, timestamp: Date.now(), state: 'rejected' };
       this.feedback = null;
-      return empty(status.state);
+      return empty(status.state, status);
     }
     const prediction = this.classifier.predict(status.clip);
     if (prediction.targetClass && DYNAMIC_CLASSES.has(prediction.targetClass)) this.evidence = { terminal: status.terminal, prediction };

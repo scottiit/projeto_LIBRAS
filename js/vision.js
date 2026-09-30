@@ -106,11 +106,11 @@ export class VisionController {
       return;
     }
     let prediction = null;
-    if (isValidHand(hand)) {
-      prediction = DYNAMIC_CLASSES.has(target)
-        ? this.dynamic.predict(hand, time, handedness, aspectRatio)
-        : this.classifier.predict(hand, /^\d$/.test(target) ? 'numbers' : 'alphabet', aspectRatio);
-    } else this.dynamic.reset();
+    // Missing observations belong to the segmenter; resetting here would erase
+    // the initial pose before its generic short-gap policy can take effect.
+    if (DYNAMIC_CLASSES.has(target)) prediction = this.dynamic.predict(hand, time, handedness, aspectRatio);
+    else if (isValidHand(hand)) prediction = this.classifier.predict(hand, /^\d$/.test(target) ? 'numbers' : 'alphabet', aspectRatio);
+    else this.dynamic.reset();
     if (generation === this.generation && target === this.target && revision === this.revision) this.onFrame(prediction, time, isValidHand(hand));
   }
   draw(hand) {
