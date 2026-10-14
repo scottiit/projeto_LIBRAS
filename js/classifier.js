@@ -35,6 +35,114 @@ export function featureDistance(a, b) {
   return Math.sqrt(sum / weight);
 }
 
+/** A/S fine comparison: 65% thumb configuration, 35% whole-hand geometry.
+ * Express thumb joints 2/3/4 relative to index MCP 5 to reduce wrist-placement
+ * noise. Distal joints receive more weight; estimated z keeps weight 0.45.
+ * Apply this SAME metric to every competing class in a candidate A/S dispute,
+ * never just to the requested label or only to one side of the comparison.
+ * This is a geometric pilot heuristic; weights require real-person evaluation.
+ */
+export function thumbFocusedDistance(a, b) {
+  let sum = 0, weight = 0;
+  for (const joint of [2, 3, 4]) for (let axis = 0; axis < 3; axis++) {
+    const currentWeight = (joint === 2 ? 1 : 2) * (axis === 2 ? .45 : 1);
+    const delta = (a[joint * 3 + axis] - a[15 + axis]) - (b[joint * 3 + axis] - b[15 + axis]);
+    sum += delta ** 2 * currentWeight; weight += currentWeight;
+  }
+  return Math.sqrt(.35 * featureDistance(a, b) ** 2 + .65 * sum / weight);
+}
+
+/** Detect obvious index-chain collapse/stretch. Bent fingers are allowed.
+ * Uses estimated 3D lengths in palm units, not projected 2D straightness.
+ * Bounds are broad pilot heuristics, not per-joint visibility probabilities.
+ */
+export function validIndexGeometry(features) {
+  if (!validFeatures(features)) return false;
+  const distance = (a, b) => Math.hypot(...[0,1,2].map(axis => features[a*3+axis]-features[b*3+axis]));
+  const bones = [5,6,7].map(index=>distance(index,index+1));
+  const middle = [9,10,11].reduce((sum,index)=>sum+distance(index,index+1),0);
+  const length = bones.reduce((sum,value)=>sum+value,0);
+  return bones.every(value=>value>.04 && value<1.3) && middle>.12 && length/middle>.25 && length/middle<1.8;
+}
+
+/** F/T compare the thumb's position relative to several index joints.
+ * Retain x/y and wrist-relative z; do not hard-code camera front/back sign.
+ * z is an estimated cue and cannot reconstruct an occluded index finger.
+ * All competitors use this same metric whenever the F/T branch is selected.
+ */
+export function thumbIndexDistance(a,b) {
+  let sum=0,weight=0;
+  for(const [thumb,index] of [[3,6],[4,6],[4,7],[4,8]]) for(let axis=0;axis<3;axis++) {
+    const axisWeight=axis===2?.8:1;
+    const delta=(a[thumb*3+axis]-a[index*3+axis])-(b[thumb*3+axis]-b[index*3+axis]);
+    sum+=axisWeight*delta**2;weight+=axisWeight;
+  }
+  return Math.sqrt(.4*featureDistance(a,b)**2+.6*sum/weight);
+}
+
+/** U/R crossing evidence in the image plane. The lateral axis is MCP 5->9,
+ * so dot products retain their sign under reflection and in-plane rotation.
+ * Reversed fingertip order indicates crossing; preserved order plus aligned
+ * extended fingers indicates parallelism. Near overlap/edge-on projection is
+ * ambiguous: estimated z cannot prove which finger is actually in front.
+ * These broad geometric thresholds need real-person calibration.
+ */
+export function inspectFingerCrossing(features) {
+  if (!validFeatures(features)) return 'uncertain';
+  const point = index => features.slice(index*3,index*3+2);
+  const subtract = (a,b) => a.map((value,axis)=>value-b[axis]);
+  const dot = (a,b) => a.reduce((sum,value,axis)=>sum+value*b[axis],0);
+  const base=subtract(point(9),point(5));
+  const index=subtract(point(8),point(5)),middle=subtract(point(12),point(9));
+  const baseSquared=dot(base,base), lengths=Math.hypot(...index)*Math.hypot(...middle);
+  if(baseSquared<.08**2 || Math.min(Math.hypot(...index),Math.hypot(...middle))<.35) return 'uncertain';
+  const order=dot(subtract(point(12),point(8)),base)/baseSquared;
+  const alignment=dot(index,middle)/lengths;
+  // A single displaced tip is insufficient: PIP/DIP must progress along each
+  // finger toward its tip. Obvious reassociation must not manufacture crossing.
+  for(const [start,end] of [[5,8],[9,12]]) {
+    const direction=subtract(point(end),point(start)), squared=dot(direction,direction);
+    let previous=0;
+    for(const joint of [start+1,start+2]) {
+      const progress=dot(subtract(point(joint),point(start)),direction)/squared;
+      if(progress<previous-.1 || progress>1.2) return 'uncertain';
+      previous=progress;
+    }
+  }
+  if(order<-.2 && alignment>.3) return 'crossed';
+  if(order>.2 && alignment>.9) return 'parallel';
+  return 'uncertain';
+}
+
+/** V-only opening descriptor in XY; invariant to rotation/reflection/scale.
+ * Measure both angular divergence and tip separation relative to finger length.
+ * Require preserved tip order and coherent intermediate joints via the existing
+ * crossing inspector. These thresholds are pilot heuristics, not visibility.
+ */
+export function inspectVOpening(features) {
+  if (!validFeatures(features) || inspectFingerCrossing(features)==='crossed') return null;
+  const vector=(a,b)=>[0,1].map(axis=>features[b*3+axis]-features[a*3+axis]);
+  const index=vector(5,8),middle=vector(9,12),base=vector(5,9),tips=vector(8,12);
+  const left=Math.hypot(...index),right=Math.hypot(...middle),width=Math.hypot(...base);
+  if(Math.min(left,right)<.35 || width<.08) return null;
+  const cosine=(index[0]*middle[0]+index[1]*middle[1])/(left*right);
+  const order=tips[0]*base[0]+tips[1]*base[1];
+  if(order<=0) return null;
+  // Independent joint progression prevents an isolated swapped fingertip from
+  // supplying opening evidence. A real V may exceed the U alignment threshold.
+  for(const [start,end]of [[5,8],[9,12]]) {
+    const direction=vector(start,end),squared=direction[0]**2+direction[1]**2;
+    let previous=0;
+    for(const joint of [start+1,start+2]) {
+      const offset=vector(start,joint),progress=(offset[0]*direction[0]+offset[1]*direction[1])/squared;
+      if(progress<previous-.1 || progress>1.2) return null;
+      previous=progress;
+    }
+  }
+  const spread=Math.hypot(...tips)/((left+right)/2);
+  return {spread,open:cosine<Math.cos(12*Math.PI/180) && Math.hypot(...tips)/width>1.6};
+}
+
 /** Example-based classifier (nearest prototype per class).
  * Translation and uniform scale are removed; both handednesses and small
  * rotations (+/-12 degrees) are tested without erasing meaningful orientation.
@@ -115,18 +223,63 @@ export class SignClassifier {
         return value;
       }));
     }
-    const distances = new Map();
-    for (const example of [...this.base, ...this.personal]) {
-      if ((domain === 'numbers') !== /^\d$/.test(example.label)) continue;
-      const distance = Math.min(...variants.map(variant => featureDistance(variant, example.features)));
-      if (!distances.has(example.label) || distance < distances.get(example.label).distance) distances.set(example.label, { label: example.label, distance, source: example.source });
-    }
-    const ranked = [...distances.values()].sort((a, b) => a.distance - b.distance);
+    const examples = [...this.base, ...this.personal].filter(example => (domain === 'numbers') === /^\d$/.test(example.label));
+    const rank = metric => {
+      const distances = new Map();
+      for (const example of examples) {
+        const distance = Math.min(...variants.map(variant => metric(variant, example.features)));
+        if (!distances.has(example.label) || distance < distances.get(example.label).distance) distances.set(example.label, { label: example.label, distance, source: example.source });
+      }
+      return [...distances.values()].sort((a, b) => a.distance - b.distance);
+    };
+    let ranked = rank(featureDistance);
     if (!ranked.length) return result;
+    // A clearly open V can resolve only its U rival. No U/R predicate or U
+    // reference distance is changed; closed/uncertain hands follow the old path.
+    let vSeparation=null;
+    if(domain==='alphabet' && ['U','V'].includes(ranked[0].label)) {
+      const opening=inspectVOpening(features),v=ranked.find(item=>item.label==='V');
+      const uExamples=examples.filter(item=>item.label==='U').map(item=>inspectVOpening(item.features)).filter(Boolean);
+      const vExamples=examples.filter(item=>item.label==='V').map(item=>inspectVOpening(item.features)).filter(item=>item?.open);
+      if(opening?.open && v && v.distance<.15 && v.distance-ranked[0].distance<.04 &&
+        uExamples.length && uExamples.every(item=>!item.open) && vExamples.some(item=>Math.abs(item.spread-opening.spread)<.15)) {
+        vSeparation=Math.max(0,Math.min(1,(opening.spread-Math.max(...uExamples.map(item=>item.spread)))/.2));
+        ranked=[v,...ranked.filter(item=>item.label!=='V')];
+      }
+    }
+    const crossingCandidate=domain==='alphabet' && ['U','R'].includes(ranked[0].label) && ranked[0].distance<.28;
+    let crossing=null;
+    if(crossingCandidate) {
+      crossing=inspectFingerCrossing(features);
+      if(crossing==='uncertain') return {...result,reason:'uncertain-crossing',alternatives:ranked.slice(0,3)};
+      // Apply geometric evidence to BOTH labels, without consulting the target.
+      // Other classes retain their distances and can still win/reject this pose.
+      ranked=ranked.map(item=>({...item,distance:item.distance+(
+        (item.label==='R' && crossing==='parallel') || (item.label==='U' && crossing==='crossed') ? .22 : 0
+      )})).sort((a,b)=>a.distance-b.distance);
+    }
+    const winner = ranked[0], rival = ranked.find(item => item.label === (winner.label === 'A' ? 'S' : 'A'));
+    const thumbFocused = domain === 'alphabet' && ['A', 'S'].includes(winner.label) && rival &&
+      winner.distance < .28 && rival.distance - winner.distance < .15;
+    const indexPair = domain === 'alphabet' && ['F','T'].includes(winner.label);
+    if (indexPair && !validIndexGeometry(features)) return { ...result, reason:'unreliable-index', alternatives:ranked.slice(0,3) };
+    const indexRival = ranked.find(item=>item.label===(winner.label==='F'?'T':'F'));
+    const indexFocused = indexPair && indexRival && winner.distance<.28 && indexRival.distance-winner.distance<.15;
+    if (thumbFocused) ranked = rank(thumbFocusedDistance);
+    else if (indexFocused) ranked = rank(thumbIndexDistance);
     const [first, second] = ranked;
+    if ((crossing==='crossed' && first.label==='U') || (crossing==='parallel' && first.label==='R')) return {...result,reason:'incompatible-crossing',alternatives:ranked.slice(0,3),crossing};
+    if (domain==='alphabet' && ['F','T'].includes(first.label) && !validIndexGeometry(features)) return { ...result, reason:'unreliable-index', alternatives:ranked.slice(0,3) };
     const similarity = Math.exp(-0.5 * (first.distance / 0.28) ** 2);
-    const separation = second ? Math.min(1, Math.max(0, (second.distance - first.distance) / 0.12)) : 1;
-    return { ...result, targetClass: first.label, confidenceProbability: Math.min(similarity, 0.5 + 0.5 * separation), distance: first.distance, source: first.source, alternatives: ranked.slice(0, 3) };
+    let separation = second ? Math.min(1, Math.max(0, (second.distance - first.distance) / 0.12)) : 1;
+    if(first.label==='V') {
+      if(!inspectVOpening(features)?.open) return {...result,reason:'v-opening-required',alternatives:ranked.slice(0,3)};
+      if(vSeparation!==null) {
+        const competitors=ranked.slice(1).map(item=>item.label==='U'?vSeparation:Math.max(0,Math.min(1,(item.distance-first.distance)/.12)));
+        separation=competitors.length?Math.min(...competitors):1;
+      }
+    }
+    return { ...result, targetClass: first.label, confidenceProbability: Math.min(similarity, 0.5 + 0.5 * separation), distance: first.distance, source: first.source, alternatives: ranked.slice(0, 3), metric: first.label==='V' && vSeparation!==null ? 'v-opening' : thumbFocused ? 'thumb-focused' : indexFocused ? 'thumb-index' : crossingCandidate ? 'finger-crossing' : 'whole-hand', crossing };
   }
 }
 
@@ -143,6 +296,10 @@ export class CalibrationSession {
     if (time - this.startedAt > 15000) return { state: 'timeout' };
     if (time - this.startedAt < 2000) return { state: 'warmup', remaining: Math.ceil((2000 - time + this.startedAt) / 1000) };
     const features = normalizeHand(hand, aspectRatio);
+    if (['F','T'].includes(this.label) && features && !validIndexGeometry(features)) {
+      this.samples=[];this.lastTime=time;
+      return {state:'tracking-lost',reason:'unreliable-index',progress:0};
+    }
     const interrupted = !features || (this.lastTime !== null && (time <= this.lastTime || time - this.lastTime > 180)) || (this.samples.length && featureDistance(features, this.samples[0].features) > 0.09);
     if (interrupted) this.samples = [];
     this.lastTime = time;

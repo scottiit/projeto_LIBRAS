@@ -2,14 +2,14 @@ import { isValidHand, DYNAMIC_CLASSES } from './trajectory.js';
 import { normalizeHand, featureDistance } from './classifier.js';
 import { apparentPalmSize, coherentPalmScale, depthRetreat, DEPTH_WEIGHT, DEPTH_AXIS } from './depth.js';
 import { EXAMPLE_LIMIT, confidenceThreshold } from './example-policy.js';
+import { JMotionState, hasIPose, inspectJPinky } from './j-motion.js';
 
 export const MOTION_VERSION = 2;
 export const MOTION_LABELS = [...DYNAMIC_CLASSES, 'UNKNOWN'];
 export const MOTION_LIMIT = EXAMPLE_LIMIT;
 const MOTION_SAMPLES = 32;
 const MOTION_GAP = 180;
-// Older saved clips may contain gaps from the retired J policy. Keep the
-// storage format readable; new captures use the generic MOTION_GAP limit.
+// J may bridge a short rotation occlusion. The same bound keeps old clips readable.
 const LEGACY_OCCLUSION_MS = 600;
 const MISSING_BUDGET = 700;
 const MIN_OBSERVED_FRACTION = .7;
@@ -32,7 +32,8 @@ function motionFrame(hand, time, handedness, aspectRatio) {
   const palm = [5, 9, 13, 17].reduce((sum, index) => sum + Math.hypot((hand[index].x - hand[0].x) * aspectRatio, hand[index].y - hand[0].y, (hand[index].z - hand[0].z) * aspectRatio), 0) / 4;
   const apparentSize = apparentPalmSize(hand, aspectRatio);
   if (!apparentSize) return null;
-  return { time, handedness, aspectRatio, pose, palm, apparentSize, wrist: [direction * hand[0].x * aspectRatio, hand[0].y] };
+  return { time, handedness, aspectRatio, pose, palm, apparentSize, wrist: [direction * hand[0].x * aspectRatio, hand[0].y],
+    pinky: [direction * hand[20].x * aspectRatio, hand[20].y], jPose: hasIPose(hand, aspectRatio) };
 }
 function scaleMotion(a, b) {
   // Depth depends on the palm, not on perfectly still fingertips. Pose changes
@@ -160,30 +161,43 @@ export class MotionClassifier {
 }
 
 /** Stable start -> motion -> stable end, shared by capture and recognition.
- * No label or finger-specific policy: J follows exactly the same path as Z.
- * Missing frames pause collection for at most 180 ms since the last valid
+ * J has an isolated observed-keyframe policy; other captures keep 180 ms.
+ * Missing frames pause collection for at most 180 ms (600 ms for a J candidate).
  * observation. Reacquisition requires the same handedness and coherent pose/XY.
  * Gaps remain explicit, bounded to 700 ms total and <=30% of the saved duration.
  * Missing/outlier frames never enter history or the final-pose dwell timer.
  */
 export class MotionSegmenter {
-  constructor() { this.reset(); }
+  constructor(label = null) { this.label = label; this.lastInterruption = null; this.reset(); }
   reset() {
     this.state = 'arming'; this.anchor = null; this.last = null;
     this.frames = []; this.preRoll = []; this.stillSince = null;
     this.lastInputTime = null; this.occluded = false;
     this.occlusions = []; this.missingMs = 0;
+    this.jMotion = null; this.extendedGap = false;
+    this.interruptionCause = null;
   }
+  get gapLimit() { return this.jMotion?.active ? LEGACY_OCCLUSION_MS : MOTION_GAP; }
   stop(reason) { this.reset(); return { state: 'tracking-lost', reason }; }
   interrupt(time, reason) {
     const gap = this.last ? time - this.last.time : Infinity;
-    if (['ready', 'recording'].includes(this.state) && gap <= MOTION_GAP && this.missingMs + gap <= MISSING_BUDGET && this.occlusions.length < 8) {
+    if (['ready', 'recording'].includes(this.state) && gap <= this.gapLimit && this.missingMs + gap <= MISSING_BUDGET && this.occlusions.length < 8) {
       this.occluded = true;
-      return { state: 'occluded', reason, gapMs: gap, remainingMs: MOTION_GAP - gap };
+      this.interruptionCause = reason;
+      this.jMotion?.interrupt();
+      return { state: 'occluded', reason, gapMs: gap, remainingMs: this.gapLimit - gap, jPhase: this.jMotion?.phase };
     }
-    return this.stop(gap > MOTION_GAP ? 'gap-too-long' : reason);
+    return { ...this.stop(gap > this.gapLimit ? 'gap-too-long' : reason), interruptionCause: reason };
   }
   observe(hand, time, handedness, aspectRatio = 1) {
+    const status = this.observeFrame(hand, time, handedness, aspectRatio);
+    if (['tracking-lost', 'too-long', 'low-coverage', 'too-short'].includes(status.state)) {
+      this.lastInterruption = { reason: status.reason ?? status.state, cause: status.interruptionCause, time };
+    }
+    if (['ready', 'complete'].includes(status.state)) this.lastInterruption = null;
+    return this.lastInterruption ? { ...status, lastInterruption: this.lastInterruption } : status;
+  }
+  observeFrame(hand, time, handedness, aspectRatio = 1) {
     if (!Number.isFinite(time) || (this.lastInputTime !== null && time <= this.lastInputTime)) return this.stop('invalid-time');
     this.lastInputTime = time;
     if (this.frames.length && time - this.frames[0].time > 4500) { this.reset(); return { state: 'too-long' }; }
@@ -191,13 +205,29 @@ export class MotionSegmenter {
     const frame = motionFrame(hand, time, handedness, aspectRatio);
     if (!frame) return this.interrupt(time, 'missing-landmarks');
     const gap = this.last ? time - this.last.time : 0;
-    const recovering = Boolean(this.last && this.occluded);
+    const recovering = Boolean(this.last && (this.occluded || gap > MOTION_GAP));
     if (this.last) {
-      if (gap > MOTION_GAP) return this.stop('gap-too-long');
-      if (frame.handedness !== this.last.handedness) return this.stop('hand-changed');
+      if (gap > this.gapLimit) {
+        const interruptionCause = this.interruptionCause;
+        return { ...this.stop('gap-too-long'), interruptionCause };
+      }
+      // A rotated palm can briefly flip the handedness label. Do not mirror
+      // these uncertain coordinates into the opposite coordinate system or
+      // append them to the clip. Wait for the ORIGINAL label within the same
+      // bounded gap budget; never silently adopt a different hand.
+      if (frame.handedness !== this.last.handedness) {
+        return this.jMotion?.active ? this.interrupt(time, 'unstable-handedness') : this.stop('hand-changed');
+      }
+      if (this.jMotion?.active) {
+        const quality = inspectJPinky(frame, this.jMotion.origin, this.last);
+        if (!quality.valid) return this.interrupt(time, quality.reason);
+      }
       // Scale is recorded for X, but never a global veto on rotating J/H/Z.
       // X's own completed-clip gate rejects discontinuous or implausible retreat.
-      if (motionDifference(this.last, frame) > 2) return this.stop('position-jump');
+      const jump = this.jMotion?.active
+        ? Math.hypot(frame.wrist[0] - this.last.wrist[0], frame.wrist[1] - this.last.wrist[1]) / this.jMotion.origin.palm > 3
+        : motionDifference(this.last, frame) > 2;
+      if (jump) return this.jMotion?.active ? this.interrupt(time, 'position-jump') : this.stop('position-jump');
     }
     if (recovering) {
       if (this.missingMs + gap > MISSING_BUDGET || this.occlusions.length >= 8) return this.stop('missing-budget');
@@ -211,18 +241,26 @@ export class MotionSegmenter {
       }
       this.occlusions.push({ start: this.last.time, end: time });
       this.missingMs += gap;
+      this.extendedGap ||= gap > MOTION_GAP;
+      this.jMotion?.interrupt();
       this.anchor = frame;
       this.stillSince = time;
     }
     this.occluded = false;
+    this.interruptionCause = null;
     this.last = frame;
     if (!this.anchor) this.anchor = frame;
     if (this.state === 'arming') {
       if (motionDifference(this.anchor, frame) > .07) this.anchor = frame;
       this.preRoll = [frame];
-      if (time - this.anchor.time >= 240) this.state = 'ready';
+      if (time - this.anchor.time >= 240) {
+        if (this.label === 'J' && !frame.jPose) return { state: 'arming', reason: 'initial-i-required' };
+        this.state = 'ready';
+        if (this.label === null || this.label === 'J') this.jMotion = new JMotionState(frame);
+      }
       return { state: this.state };
     }
+    this.jMotion?.observe(frame);
     if (this.state === 'ready') {
       this.preRoll.push(frame);
       this.preRoll = this.preRoll.filter(item => time - item.time <= 160).slice(-12);
@@ -233,21 +271,25 @@ export class MotionSegmenter {
     } else if (time - this.frames.at(-1).time >= 30) this.frames.push(frame);
     if (time - this.frames[0].time > 4500 || this.frames.length >= 160) { this.reset(); return { state: 'too-long' }; }
     if (motionDifference(this.anchor, frame) > .07 || Math.abs(scaleMotion(this.anchor, frame)) > .025) { this.anchor = frame; this.stillSince = time; }
-    if (time - this.stillSince < 300) return { state: 'recording', durationMs: time - this.frames[0].time };
+    const observedJDescent = ['descending', 'hook'].includes(this.jMotion?.phase);
+    if (time - this.stillSince < 300 || ((this.label === 'J' || this.extendedGap || observedJDescent) && this.jMotion?.phase !== 'complete')) {
+      return { state: 'recording', durationMs: time - this.frames[0].time, jPhase: this.jMotion?.phase };
+    }
     // Keep only 100 ms of the final pause: its length is not part of the sign.
     const trimmed = this.frames.filter(item => item.time <= this.stillSince + 100);
     const duration = trimmed.length ? trimmed.at(-1).time - trimmed[0].time : 0;
     const enoughVisible = duration > 0 && this.missingMs <= duration * (1 - MIN_OBSERVED_FRACTION);
     const clip = trimmed.length >= 4 && enoughVisible ? encodeMotion(trimmed, this.occlusions) : null;
+    const jPhase = this.jMotion?.phase, extendedGap = this.extendedGap;
     this.reset();
-    return clip ? { state: 'complete', clip, terminal: frame } : { state: enoughVisible ? 'too-short' : 'low-coverage' };
+    return clip ? { state: 'complete', clip, terminal: frame, jPhase, extendedGap } : { state: enoughVisible ? 'too-short' : 'low-coverage' };
   }
 }
 
 export class MotionCapture {
   constructor(label, now) {
     if (!MOTION_LABELS.includes(label)) throw new Error('Classe dinâmica inválida.');
-    this.label = label; this.startedAt = now; this.segmenter = new MotionSegmenter();
+    this.label = label; this.startedAt = now; this.segmenter = new MotionSegmenter(label);
   }
   observe(hand, time, aspectRatio = 1, handedness) {
     if (time - this.startedAt > 15000) return { state: 'timeout', dynamic: true };
@@ -291,6 +333,11 @@ export class TemporalRecognizer {
       return empty(status.state, status);
     }
     const prediction = this.classifier.predict(status.clip);
+    // An automatically detected I-pose candidate may use the longer grace, but
+    // that cannot relax H/K/X/Z. The game target never selects the policy.
+    if ((status.extendedGap && prediction.targetClass !== 'J') || (prediction.targetClass === 'J' && status.jPhase !== 'complete')) {
+      return empty('rejected', { reason: 'j-keyframes-required' });
+    }
     if (prediction.targetClass && DYNAMIC_CLASSES.has(prediction.targetClass)) this.evidence = { terminal: status.terminal, prediction };
     else this.feedback = { prediction, until: time + 1200 };
     return { ...prediction, state: this.evidence ? 'confirming' : 'rejected' };

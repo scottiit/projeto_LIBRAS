@@ -152,6 +152,20 @@ function depthMessage(depth) {
   return messages[depth?.reason] ?? 'não foi possível confirmar o recuo. Afaste a mão e pare na posição final.';
 }
 function motionMessage(status) {
+  const interruptionReasons = { 'gap-too-long': 'o rastreador não recuperou pontos confiáveis dentro da janela permitida', 'hand-changed': 'o rótulo direita/esquerda mudou', 'unstable-handedness': 'o rótulo direita/esquerda ficou instável', 'position-jump': 'as coordenadas saltaram', 'missing-budget': 'houve muitos intervalos sem pontos confiáveis', 'too-long': 'a trajetória não foi concluída em 4,5 segundos', 'low-coverage': 'mais de 30% da trajetória ficou sem observações', 'too-short': 'a sequência não formou um movimento válido', 'camera-changed': 'a proporção da câmera mudou', 'invalid-time': 'o tempo dos frames ficou inválido' };
+  if (status.state === 'arming' && status.lastInterruption) {
+    const cause = status.lastInterruption.cause;
+    const detail = cause === 'unstable-handedness' ? ' O rótulo direita/esquerda não estabilizou.' : cause === 'position-jump' ? ' As coordenadas continuaram instáveis.' : cause?.startsWith('pinky-') ? ' Os pontos do mindinho não recuperaram uma geometria coerente.' : '';
+    return `Captura reiniciada: ${interruptionReasons[status.lastInterruption.reason] ?? status.lastInterruption.reason}.${detail} Prepare novamente a configuração inicial.`;
+  }
+  if (status.state === 'occluded') {
+    const detail = status.reason === 'unstable-handedness' ? 'Rótulo direita/esquerda instável' : status.reason === 'pinky-deformed' ? 'Geometria do mindinho inconsistente' : status.reason === 'pinky-jump' ? 'Salto nos pontos do mindinho' : status.reason === 'position-jump' ? 'Coordenadas instáveis' : 'Pontos ausentes ou inválidos';
+    return `${detail}. Início preservado; aguardando recuperação (${Math.ceil(status.remainingMs ?? 0)} ms restantes).`;
+  }
+  if (status.reason === 'initial-i-required') return 'J: prepare a configuração de I, com o mindinho estendido.';
+  if (status.state === 'recording' && status.jPhase && status.jPhase !== 'inactive') {
+    return ({ initial: 'J: início preservado. Desça com o mindinho.', descending: 'J: descida registrada. Termine o gancho para o lado e para cima.', hook: 'J: gancho observado. Pare na posição final.', complete: 'J: trajetória completa. Mantenha a posição final.' })[status.jPhase];
+  }
   if (status.state === 'confirming') return `Movimento: ${status.targetClass} · semelhança ${(status.confidenceProbability * 100).toFixed(1)}% · mantenha a pose final`;
   if (status.state === 'tracking-lost') {
     const reasons = { 'gap-too-long': 'A perda de rastreamento durou demais.', 'position-jump': 'A posição da mão mudou bruscamente.', 'scale-jump': 'O tamanho da mão mudou bruscamente.', 'hand-changed': 'A mão identificada mudou.', 'missing-budget': 'Muitos trechos ficaram sem rastreamento.' };
@@ -186,6 +200,7 @@ function showMotionState(status) {
   $('camera-stage').dataset.motionState = state;
   setText('motion-indicator', labels[state] ?? 'AGUARDANDO');
   setText('motion-cue', state === 'camera-off' ? 'Ative a câmera para começar.' : state === 'warmup' ? `Prepare-se. A captura começa em ${status.remaining ?? 2}…` : state === 'collecting' ? `Mantenha a pose estável… ${Math.round((status.progress ?? 0) * 100)}%` : state === 'complete' ? 'Captura concluída. Faça o sinal novamente para testar.' : state === 'recording' ? (capturing ? 'Gravando seu exemplo. Termine a trajetória e pare a mão.' : 'Lendo a trajetória. Termine o movimento e pare a mão.') : state === 'ready' ? 'Pronto para começar: faça o movimento agora.' : motionMessage(status));
+  if (state === 'recording' && status.jPhase && status.jPhase !== 'inactive') setText('motion-cue', motionMessage(status));
 }
 function cancelCountdown() {
   countdownEndsAt = null;

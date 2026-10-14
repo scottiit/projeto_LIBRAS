@@ -433,6 +433,114 @@ function featureDistance(a, b) {
   return Math.sqrt(sum / weight);
 }
 
+/** A/S fine comparison: 65% thumb configuration, 35% whole-hand geometry.
+ * Express thumb joints 2/3/4 relative to index MCP 5 to reduce wrist-placement
+ * noise. Distal joints receive more weight; estimated z keeps weight 0.45.
+ * Apply this SAME metric to every competing class in a candidate A/S dispute,
+ * never just to the requested label or only to one side of the comparison.
+ * This is a geometric pilot heuristic; weights require real-person evaluation.
+ */
+function thumbFocusedDistance(a, b) {
+  let sum = 0, weight = 0;
+  for (const joint of [2, 3, 4]) for (let axis = 0; axis < 3; axis++) {
+    const currentWeight = (joint === 2 ? 1 : 2) * (axis === 2 ? .45 : 1);
+    const delta = (a[joint * 3 + axis] - a[15 + axis]) - (b[joint * 3 + axis] - b[15 + axis]);
+    sum += delta ** 2 * currentWeight; weight += currentWeight;
+  }
+  return Math.sqrt(.35 * featureDistance(a, b) ** 2 + .65 * sum / weight);
+}
+
+/** Detect obvious index-chain collapse/stretch. Bent fingers are allowed.
+ * Uses estimated 3D lengths in palm units, not projected 2D straightness.
+ * Bounds are broad pilot heuristics, not per-joint visibility probabilities.
+ */
+function validIndexGeometry(features) {
+  if (!validFeatures(features)) return false;
+  const distance = (a, b) => Math.hypot(...[0,1,2].map(axis => features[a*3+axis]-features[b*3+axis]));
+  const bones = [5,6,7].map(index=>distance(index,index+1));
+  const middle = [9,10,11].reduce((sum,index)=>sum+distance(index,index+1),0);
+  const length = bones.reduce((sum,value)=>sum+value,0);
+  return bones.every(value=>value>.04 && value<1.3) && middle>.12 && length/middle>.25 && length/middle<1.8;
+}
+
+/** F/T compare the thumb's position relative to several index joints.
+ * Retain x/y and wrist-relative z; do not hard-code camera front/back sign.
+ * z is an estimated cue and cannot reconstruct an occluded index finger.
+ * All competitors use this same metric whenever the F/T branch is selected.
+ */
+function thumbIndexDistance(a,b) {
+  let sum=0,weight=0;
+  for(const [thumb,index] of [[3,6],[4,6],[4,7],[4,8]]) for(let axis=0;axis<3;axis++) {
+    const axisWeight=axis===2?.8:1;
+    const delta=(a[thumb*3+axis]-a[index*3+axis])-(b[thumb*3+axis]-b[index*3+axis]);
+    sum+=axisWeight*delta**2;weight+=axisWeight;
+  }
+  return Math.sqrt(.4*featureDistance(a,b)**2+.6*sum/weight);
+}
+
+/** U/R crossing evidence in the image plane. The lateral axis is MCP 5->9,
+ * so dot products retain their sign under reflection and in-plane rotation.
+ * Reversed fingertip order indicates crossing; preserved order plus aligned
+ * extended fingers indicates parallelism. Near overlap/edge-on projection is
+ * ambiguous: estimated z cannot prove which finger is actually in front.
+ * These broad geometric thresholds need real-person calibration.
+ */
+function inspectFingerCrossing(features) {
+  if (!validFeatures(features)) return 'uncertain';
+  const point = index => features.slice(index*3,index*3+2);
+  const subtract = (a,b) => a.map((value,axis)=>value-b[axis]);
+  const dot = (a,b) => a.reduce((sum,value,axis)=>sum+value*b[axis],0);
+  const base=subtract(point(9),point(5));
+  const index=subtract(point(8),point(5)),middle=subtract(point(12),point(9));
+  const baseSquared=dot(base,base), lengths=Math.hypot(...index)*Math.hypot(...middle);
+  if(baseSquared<.08**2 || Math.min(Math.hypot(...index),Math.hypot(...middle))<.35) return 'uncertain';
+  const order=dot(subtract(point(12),point(8)),base)/baseSquared;
+  const alignment=dot(index,middle)/lengths;
+  // A single displaced tip is insufficient: PIP/DIP must progress along each
+  // finger toward its tip. Obvious reassociation must not manufacture crossing.
+  for(const [start,end] of [[5,8],[9,12]]) {
+    const direction=subtract(point(end),point(start)), squared=dot(direction,direction);
+    let previous=0;
+    for(const joint of [start+1,start+2]) {
+      const progress=dot(subtract(point(joint),point(start)),direction)/squared;
+      if(progress<previous-.1 || progress>1.2) return 'uncertain';
+      previous=progress;
+    }
+  }
+  if(order<-.2 && alignment>.3) return 'crossed';
+  if(order>.2 && alignment>.9) return 'parallel';
+  return 'uncertain';
+}
+
+/** V-only opening descriptor in XY; invariant to rotation/reflection/scale.
+ * Measure both angular divergence and tip separation relative to finger length.
+ * Require preserved tip order and coherent intermediate joints via the existing
+ * crossing inspector. These thresholds are pilot heuristics, not visibility.
+ */
+function inspectVOpening(features) {
+  if (!validFeatures(features) || inspectFingerCrossing(features)==='crossed') return null;
+  const vector=(a,b)=>[0,1].map(axis=>features[b*3+axis]-features[a*3+axis]);
+  const index=vector(5,8),middle=vector(9,12),base=vector(5,9),tips=vector(8,12);
+  const left=Math.hypot(...index),right=Math.hypot(...middle),width=Math.hypot(...base);
+  if(Math.min(left,right)<.35 || width<.08) return null;
+  const cosine=(index[0]*middle[0]+index[1]*middle[1])/(left*right);
+  const order=tips[0]*base[0]+tips[1]*base[1];
+  if(order<=0) return null;
+  // Independent joint progression prevents an isolated swapped fingertip from
+  // supplying opening evidence. A real V may exceed the U alignment threshold.
+  for(const [start,end]of [[5,8],[9,12]]) {
+    const direction=vector(start,end),squared=direction[0]**2+direction[1]**2;
+    let previous=0;
+    for(const joint of [start+1,start+2]) {
+      const offset=vector(start,joint),progress=(offset[0]*direction[0]+offset[1]*direction[1])/squared;
+      if(progress<previous-.1 || progress>1.2) return null;
+      previous=progress;
+    }
+  }
+  const spread=Math.hypot(...tips)/((left+right)/2);
+  return {spread,open:cosine<Math.cos(12*Math.PI/180) && Math.hypot(...tips)/width>1.6};
+}
+
 /** Example-based classifier (nearest prototype per class).
  * Translation and uniform scale are removed; both handednesses and small
  * rotations (+/-12 degrees) are tested without erasing meaningful orientation.
@@ -513,18 +621,63 @@ class SignClassifier {
         return value;
       }));
     }
-    const distances = new Map();
-    for (const example of [...this.base, ...this.personal]) {
-      if ((domain === 'numbers') !== /^\d$/.test(example.label)) continue;
-      const distance = Math.min(...variants.map(variant => featureDistance(variant, example.features)));
-      if (!distances.has(example.label) || distance < distances.get(example.label).distance) distances.set(example.label, { label: example.label, distance, source: example.source });
-    }
-    const ranked = [...distances.values()].sort((a, b) => a.distance - b.distance);
+    const examples = [...this.base, ...this.personal].filter(example => (domain === 'numbers') === /^\d$/.test(example.label));
+    const rank = metric => {
+      const distances = new Map();
+      for (const example of examples) {
+        const distance = Math.min(...variants.map(variant => metric(variant, example.features)));
+        if (!distances.has(example.label) || distance < distances.get(example.label).distance) distances.set(example.label, { label: example.label, distance, source: example.source });
+      }
+      return [...distances.values()].sort((a, b) => a.distance - b.distance);
+    };
+    let ranked = rank(featureDistance);
     if (!ranked.length) return result;
+    // A clearly open V can resolve only its U rival. No U/R predicate or U
+    // reference distance is changed; closed/uncertain hands follow the old path.
+    let vSeparation=null;
+    if(domain==='alphabet' && ['U','V'].includes(ranked[0].label)) {
+      const opening=inspectVOpening(features),v=ranked.find(item=>item.label==='V');
+      const uExamples=examples.filter(item=>item.label==='U').map(item=>inspectVOpening(item.features)).filter(Boolean);
+      const vExamples=examples.filter(item=>item.label==='V').map(item=>inspectVOpening(item.features)).filter(item=>item?.open);
+      if(opening?.open && v && v.distance<.15 && v.distance-ranked[0].distance<.04 &&
+        uExamples.length && uExamples.every(item=>!item.open) && vExamples.some(item=>Math.abs(item.spread-opening.spread)<.15)) {
+        vSeparation=Math.max(0,Math.min(1,(opening.spread-Math.max(...uExamples.map(item=>item.spread)))/.2));
+        ranked=[v,...ranked.filter(item=>item.label!=='V')];
+      }
+    }
+    const crossingCandidate=domain==='alphabet' && ['U','R'].includes(ranked[0].label) && ranked[0].distance<.28;
+    let crossing=null;
+    if(crossingCandidate) {
+      crossing=inspectFingerCrossing(features);
+      if(crossing==='uncertain') return {...result,reason:'uncertain-crossing',alternatives:ranked.slice(0,3)};
+      // Apply geometric evidence to BOTH labels, without consulting the target.
+      // Other classes retain their distances and can still win/reject this pose.
+      ranked=ranked.map(item=>({...item,distance:item.distance+(
+        (item.label==='R' && crossing==='parallel') || (item.label==='U' && crossing==='crossed') ? .22 : 0
+      )})).sort((a,b)=>a.distance-b.distance);
+    }
+    const winner = ranked[0], rival = ranked.find(item => item.label === (winner.label === 'A' ? 'S' : 'A'));
+    const thumbFocused = domain === 'alphabet' && ['A', 'S'].includes(winner.label) && rival &&
+      winner.distance < .28 && rival.distance - winner.distance < .15;
+    const indexPair = domain === 'alphabet' && ['F','T'].includes(winner.label);
+    if (indexPair && !validIndexGeometry(features)) return { ...result, reason:'unreliable-index', alternatives:ranked.slice(0,3) };
+    const indexRival = ranked.find(item=>item.label===(winner.label==='F'?'T':'F'));
+    const indexFocused = indexPair && indexRival && winner.distance<.28 && indexRival.distance-winner.distance<.15;
+    if (thumbFocused) ranked = rank(thumbFocusedDistance);
+    else if (indexFocused) ranked = rank(thumbIndexDistance);
     const [first, second] = ranked;
+    if ((crossing==='crossed' && first.label==='U') || (crossing==='parallel' && first.label==='R')) return {...result,reason:'incompatible-crossing',alternatives:ranked.slice(0,3),crossing};
+    if (domain==='alphabet' && ['F','T'].includes(first.label) && !validIndexGeometry(features)) return { ...result, reason:'unreliable-index', alternatives:ranked.slice(0,3) };
     const similarity = Math.exp(-0.5 * (first.distance / 0.28) ** 2);
-    const separation = second ? Math.min(1, Math.max(0, (second.distance - first.distance) / 0.12)) : 1;
-    return { ...result, targetClass: first.label, confidenceProbability: Math.min(similarity, 0.5 + 0.5 * separation), distance: first.distance, source: first.source, alternatives: ranked.slice(0, 3) };
+    let separation = second ? Math.min(1, Math.max(0, (second.distance - first.distance) / 0.12)) : 1;
+    if(first.label==='V') {
+      if(!inspectVOpening(features)?.open) return {...result,reason:'v-opening-required',alternatives:ranked.slice(0,3)};
+      if(vSeparation!==null) {
+        const competitors=ranked.slice(1).map(item=>item.label==='U'?vSeparation:Math.max(0,Math.min(1,(item.distance-first.distance)/.12)));
+        separation=competitors.length?Math.min(...competitors):1;
+      }
+    }
+    return { ...result, targetClass: first.label, confidenceProbability: Math.min(similarity, 0.5 + 0.5 * separation), distance: first.distance, source: first.source, alternatives: ranked.slice(0, 3), metric: first.label==='V' && vSeparation!==null ? 'v-opening' : thumbFocused ? 'thumb-focused' : indexFocused ? 'thumb-index' : crossingCandidate ? 'finger-crossing' : 'whole-hand', crossing };
   }
 }
 
@@ -541,6 +694,10 @@ class CalibrationSession {
     if (time - this.startedAt > 15000) return { state: 'timeout' };
     if (time - this.startedAt < 2000) return { state: 'warmup', remaining: Math.ceil((2000 - time + this.startedAt) / 1000) };
     const features = normalizeHand(hand, aspectRatio);
+    if (['F','T'].includes(this.label) && features && !validIndexGeometry(features)) {
+      this.samples=[];this.lastTime=time;
+      return {state:'tracking-lost',reason:'unreliable-index',progress:0};
+    }
     const interrupted = !features || (this.lastTime !== null && (time <= this.lastTime || time - this.lastTime > 180)) || (this.samples.length && featureDistance(features, this.samples[0].features) > 0.09);
     if (interrupted) this.samples = [];
     this.lastTime = time;
@@ -655,13 +812,100 @@ function depthRetreat(clip, featureDistance) {
 }
 
 
+/** Observed keyframes only. Image Y grows downwards; X is already mirrored and
+ * canonicalized by motionFrame. Distances use the INITIAL palm size, so wrist
+ * pitch cannot turn a shrinking projected palm into a large artificial path.
+ * No palm normal or Euler angle is required: monocular depth is not reliable
+ * enough to require an exact 180-degree pitch/yaw. These are tunable pilot
+ * heuristics, not a linguistic classifier or reconstruction of hidden joints.
+ */
+class JMotionState {
+  constructor(frame) {
+    this.phase = frame?.jPose ? 'initial' : 'inactive';
+    this.origin = frame; this.bottom = frame; this.hookSince = null;
+  }
+  get active() { return this.phase !== 'inactive'; }
+  observe(frame) {
+    if (!this.active || this.phase === 'complete') return;
+    const scale = this.origin.palm;
+    if (this.phase === 'initial') {
+      if ((frame.pinky[1] - this.origin.pinky[1]) / scale > .25) {
+        this.phase = 'descending'; this.bottom = frame;
+      }
+      return;
+    }
+    if (frame.pinky[1] > this.bottom.pinky[1]) this.bottom = frame;
+    const left = (this.bottom.pinky[0] - frame.pinky[0]) / scale;
+    const up = (this.bottom.pinky[1] - frame.pinky[1]) / scale;
+    // Observe a real descending point AND a later left/up hook. Interpolated
+    // points never enter this method and cannot supply a missing keyframe.
+    if (left > .15 && up > .12 && frame.jPose) {
+      this.hookSince ??= frame.time;
+      this.phase = frame.time - this.hookSince >= 100 ? 'complete' : 'hook';
+    } else { this.hookSince = null; this.phase = 'descending'; }
+  }
+  interrupt() { this.hookSince = null; }
+}
+
+/** Rotation-invariant chord / bone-chain ratio for the little finger.
+ * Folded fingers are checked with wrist-to-tip vs wrist-to-PIP distance.
+ * This uses estimated z for local shape only, never absolute camera depth.
+ * The thumb is deliberately not a hard veto because it is often occluded.
+ */
+function hasIPose(hand, aspect) {
+  if (!isValidHand(hand) || !Number.isFinite(aspect) || aspect <= 0) return false;
+  const distance = (a, b) => Math.hypot((hand[a].x - hand[b].x) * aspect,
+    hand[a].y - hand[b].y, (hand[a].z - hand[b].z) * aspect);
+  const chain = distance(17, 18) + distance(18, 19) + distance(19, 20);
+  return chain > 1e-6 && distance(17, 20) / chain > .8 &&
+    [6, 10, 14].every(pip => distance(0, pip + 2) < distance(0, pip) * 1.15);
+}
+
+/** Conservative consistency filter, NOT a visibility/confidence estimator.
+ * pose is wrist-relative, aspect-corrected and normalized by 3D palm size.
+ * Bone lengths and chord/chain ratio survive rigid pitch/yaw, unlike image
+ * distances alone. Compare to this execution's initial hand, not fixed anatomy.
+ * Broad bounds accommodate noisy monocular z. Smooth but incorrect landmarks
+ * can still pass: geometry cannot prove that a point lies on the real finger.
+ * Temporal displacement is measured relative to MCP 17, removing translation.
+ * The allowance grows with elapsed time since the last ACCEPTED observation;
+ * rejected frames must never update either reference or previous frame.
+ */
+function inspectJPinky(frame, reference, previous) {
+  const extract = item => {
+    const pose = item?.pose;
+    if (!Array.isArray(pose) || pose.length < 63 || !pose.every(Number.isFinite)) return null;
+    const point = index => pose.slice(index * 3, index * 3 + 3);
+    const relative = [18, 19, 20].map(index => point(index).map((value, axis) => value - point(17)[axis]));
+    const distance = (a, b) => Math.hypot(...point(a).map((value, axis) => value - point(b)[axis]));
+    const bones = [17, 18, 19].map(index => distance(index, index + 1));
+    const length = bones.reduce((sum, value) => sum + value, 0);
+    return length > 1e-6 && bones.every(value => value > 1e-6)
+      ? { bones, relative, straightness: distance(17, 20) / length } : null;
+  };
+  const current = extract(frame), initial = extract(reference), last = extract(previous);
+  if (!current || !initial || !last) return { valid: false, reason: 'pinky-deformed' };
+  // J retains an extended little finger. Reject a collapsed chain or a tip
+  // snapped into the palm; never advance a keyframe using this inferred fold.
+  if (current.straightness < .65 || current.bones.some((length, index) => {
+    const ratio = length / initial.bones[index];
+    return ratio < .5 || ratio > 1.9;
+  })) return { valid: false, reason: 'pinky-deformed' };
+  const elapsed = (frame.time - previous.time) / 1000;
+  if (!Number.isFinite(elapsed) || elapsed <= 0) return { valid: false, reason: 'pinky-jump' };
+  const displacement = Math.max(...current.relative.map((point, index) =>
+    Math.hypot(...point.map((value, axis) => value - last.relative[index][axis]))));
+  if (displacement > .5 + 20 * elapsed) return { valid: false, reason: 'pinky-jump' };
+  return { valid: true };
+}
+
+
 const MOTION_VERSION = 2;
 const MOTION_LABELS = [...DYNAMIC_CLASSES, 'UNKNOWN'];
 const MOTION_LIMIT = EXAMPLE_LIMIT;
 const MOTION_SAMPLES = 32;
 const MOTION_GAP = 180;
-// Older saved clips may contain gaps from the retired J policy. Keep the
-// storage format readable; new captures use the generic MOTION_GAP limit.
+// J may bridge a short rotation occlusion. The same bound keeps old clips readable.
 const LEGACY_OCCLUSION_MS = 600;
 const MISSING_BUDGET = 700;
 const MIN_OBSERVED_FRACTION = .7;
@@ -684,7 +928,8 @@ function motionFrame(hand, time, handedness, aspectRatio) {
   const palm = [5, 9, 13, 17].reduce((sum, index) => sum + Math.hypot((hand[index].x - hand[0].x) * aspectRatio, hand[index].y - hand[0].y, (hand[index].z - hand[0].z) * aspectRatio), 0) / 4;
   const apparentSize = apparentPalmSize(hand, aspectRatio);
   if (!apparentSize) return null;
-  return { time, handedness, aspectRatio, pose, palm, apparentSize, wrist: [direction * hand[0].x * aspectRatio, hand[0].y] };
+  return { time, handedness, aspectRatio, pose, palm, apparentSize, wrist: [direction * hand[0].x * aspectRatio, hand[0].y],
+    pinky: [direction * hand[20].x * aspectRatio, hand[20].y], jPose: hasIPose(hand, aspectRatio) };
 }
 function scaleMotion(a, b) {
   // Depth depends on the palm, not on perfectly still fingertips. Pose changes
@@ -812,30 +1057,43 @@ class MotionClassifier {
 }
 
 /** Stable start -> motion -> stable end, shared by capture and recognition.
- * No label or finger-specific policy: J follows exactly the same path as Z.
- * Missing frames pause collection for at most 180 ms since the last valid
+ * J has an isolated observed-keyframe policy; other captures keep 180 ms.
+ * Missing frames pause collection for at most 180 ms (600 ms for a J candidate).
  * observation. Reacquisition requires the same handedness and coherent pose/XY.
  * Gaps remain explicit, bounded to 700 ms total and <=30% of the saved duration.
  * Missing/outlier frames never enter history or the final-pose dwell timer.
  */
 class MotionSegmenter {
-  constructor() { this.reset(); }
+  constructor(label = null) { this.label = label; this.lastInterruption = null; this.reset(); }
   reset() {
     this.state = 'arming'; this.anchor = null; this.last = null;
     this.frames = []; this.preRoll = []; this.stillSince = null;
     this.lastInputTime = null; this.occluded = false;
     this.occlusions = []; this.missingMs = 0;
+    this.jMotion = null; this.extendedGap = false;
+    this.interruptionCause = null;
   }
+  get gapLimit() { return this.jMotion?.active ? LEGACY_OCCLUSION_MS : MOTION_GAP; }
   stop(reason) { this.reset(); return { state: 'tracking-lost', reason }; }
   interrupt(time, reason) {
     const gap = this.last ? time - this.last.time : Infinity;
-    if (['ready', 'recording'].includes(this.state) && gap <= MOTION_GAP && this.missingMs + gap <= MISSING_BUDGET && this.occlusions.length < 8) {
+    if (['ready', 'recording'].includes(this.state) && gap <= this.gapLimit && this.missingMs + gap <= MISSING_BUDGET && this.occlusions.length < 8) {
       this.occluded = true;
-      return { state: 'occluded', reason, gapMs: gap, remainingMs: MOTION_GAP - gap };
+      this.interruptionCause = reason;
+      this.jMotion?.interrupt();
+      return { state: 'occluded', reason, gapMs: gap, remainingMs: this.gapLimit - gap, jPhase: this.jMotion?.phase };
     }
-    return this.stop(gap > MOTION_GAP ? 'gap-too-long' : reason);
+    return { ...this.stop(gap > this.gapLimit ? 'gap-too-long' : reason), interruptionCause: reason };
   }
   observe(hand, time, handedness, aspectRatio = 1) {
+    const status = this.observeFrame(hand, time, handedness, aspectRatio);
+    if (['tracking-lost', 'too-long', 'low-coverage', 'too-short'].includes(status.state)) {
+      this.lastInterruption = { reason: status.reason ?? status.state, cause: status.interruptionCause, time };
+    }
+    if (['ready', 'complete'].includes(status.state)) this.lastInterruption = null;
+    return this.lastInterruption ? { ...status, lastInterruption: this.lastInterruption } : status;
+  }
+  observeFrame(hand, time, handedness, aspectRatio = 1) {
     if (!Number.isFinite(time) || (this.lastInputTime !== null && time <= this.lastInputTime)) return this.stop('invalid-time');
     this.lastInputTime = time;
     if (this.frames.length && time - this.frames[0].time > 4500) { this.reset(); return { state: 'too-long' }; }
@@ -843,13 +1101,29 @@ class MotionSegmenter {
     const frame = motionFrame(hand, time, handedness, aspectRatio);
     if (!frame) return this.interrupt(time, 'missing-landmarks');
     const gap = this.last ? time - this.last.time : 0;
-    const recovering = Boolean(this.last && this.occluded);
+    const recovering = Boolean(this.last && (this.occluded || gap > MOTION_GAP));
     if (this.last) {
-      if (gap > MOTION_GAP) return this.stop('gap-too-long');
-      if (frame.handedness !== this.last.handedness) return this.stop('hand-changed');
+      if (gap > this.gapLimit) {
+        const interruptionCause = this.interruptionCause;
+        return { ...this.stop('gap-too-long'), interruptionCause };
+      }
+      // A rotated palm can briefly flip the handedness label. Do not mirror
+      // these uncertain coordinates into the opposite coordinate system or
+      // append them to the clip. Wait for the ORIGINAL label within the same
+      // bounded gap budget; never silently adopt a different hand.
+      if (frame.handedness !== this.last.handedness) {
+        return this.jMotion?.active ? this.interrupt(time, 'unstable-handedness') : this.stop('hand-changed');
+      }
+      if (this.jMotion?.active) {
+        const quality = inspectJPinky(frame, this.jMotion.origin, this.last);
+        if (!quality.valid) return this.interrupt(time, quality.reason);
+      }
       // Scale is recorded for X, but never a global veto on rotating J/H/Z.
       // X's own completed-clip gate rejects discontinuous or implausible retreat.
-      if (motionDifference(this.last, frame) > 2) return this.stop('position-jump');
+      const jump = this.jMotion?.active
+        ? Math.hypot(frame.wrist[0] - this.last.wrist[0], frame.wrist[1] - this.last.wrist[1]) / this.jMotion.origin.palm > 3
+        : motionDifference(this.last, frame) > 2;
+      if (jump) return this.jMotion?.active ? this.interrupt(time, 'position-jump') : this.stop('position-jump');
     }
     if (recovering) {
       if (this.missingMs + gap > MISSING_BUDGET || this.occlusions.length >= 8) return this.stop('missing-budget');
@@ -863,18 +1137,26 @@ class MotionSegmenter {
       }
       this.occlusions.push({ start: this.last.time, end: time });
       this.missingMs += gap;
+      this.extendedGap ||= gap > MOTION_GAP;
+      this.jMotion?.interrupt();
       this.anchor = frame;
       this.stillSince = time;
     }
     this.occluded = false;
+    this.interruptionCause = null;
     this.last = frame;
     if (!this.anchor) this.anchor = frame;
     if (this.state === 'arming') {
       if (motionDifference(this.anchor, frame) > .07) this.anchor = frame;
       this.preRoll = [frame];
-      if (time - this.anchor.time >= 240) this.state = 'ready';
+      if (time - this.anchor.time >= 240) {
+        if (this.label === 'J' && !frame.jPose) return { state: 'arming', reason: 'initial-i-required' };
+        this.state = 'ready';
+        if (this.label === null || this.label === 'J') this.jMotion = new JMotionState(frame);
+      }
       return { state: this.state };
     }
+    this.jMotion?.observe(frame);
     if (this.state === 'ready') {
       this.preRoll.push(frame);
       this.preRoll = this.preRoll.filter(item => time - item.time <= 160).slice(-12);
@@ -885,21 +1167,25 @@ class MotionSegmenter {
     } else if (time - this.frames.at(-1).time >= 30) this.frames.push(frame);
     if (time - this.frames[0].time > 4500 || this.frames.length >= 160) { this.reset(); return { state: 'too-long' }; }
     if (motionDifference(this.anchor, frame) > .07 || Math.abs(scaleMotion(this.anchor, frame)) > .025) { this.anchor = frame; this.stillSince = time; }
-    if (time - this.stillSince < 300) return { state: 'recording', durationMs: time - this.frames[0].time };
+    const observedJDescent = ['descending', 'hook'].includes(this.jMotion?.phase);
+    if (time - this.stillSince < 300 || ((this.label === 'J' || this.extendedGap || observedJDescent) && this.jMotion?.phase !== 'complete')) {
+      return { state: 'recording', durationMs: time - this.frames[0].time, jPhase: this.jMotion?.phase };
+    }
     // Keep only 100 ms of the final pause: its length is not part of the sign.
     const trimmed = this.frames.filter(item => item.time <= this.stillSince + 100);
     const duration = trimmed.length ? trimmed.at(-1).time - trimmed[0].time : 0;
     const enoughVisible = duration > 0 && this.missingMs <= duration * (1 - MIN_OBSERVED_FRACTION);
     const clip = trimmed.length >= 4 && enoughVisible ? encodeMotion(trimmed, this.occlusions) : null;
+    const jPhase = this.jMotion?.phase, extendedGap = this.extendedGap;
     this.reset();
-    return clip ? { state: 'complete', clip, terminal: frame } : { state: enoughVisible ? 'too-short' : 'low-coverage' };
+    return clip ? { state: 'complete', clip, terminal: frame, jPhase, extendedGap } : { state: enoughVisible ? 'too-short' : 'low-coverage' };
   }
 }
 
 class MotionCapture {
   constructor(label, now) {
     if (!MOTION_LABELS.includes(label)) throw new Error('Classe dinâmica inválida.');
-    this.label = label; this.startedAt = now; this.segmenter = new MotionSegmenter();
+    this.label = label; this.startedAt = now; this.segmenter = new MotionSegmenter(label);
   }
   observe(hand, time, aspectRatio = 1, handedness) {
     if (time - this.startedAt > 15000) return { state: 'timeout', dynamic: true };
@@ -943,6 +1229,11 @@ class TemporalRecognizer {
       return empty(status.state, status);
     }
     const prediction = this.classifier.predict(status.clip);
+    // An automatically detected I-pose candidate may use the longer grace, but
+    // that cannot relax H/K/X/Z. The game target never selects the policy.
+    if ((status.extendedGap && prediction.targetClass !== 'J') || (prediction.targetClass === 'J' && status.jPhase !== 'complete')) {
+      return empty('rejected', { reason: 'j-keyframes-required' });
+    }
     if (prediction.targetClass && DYNAMIC_CLASSES.has(prediction.targetClass)) this.evidence = { terminal: status.terminal, prediction };
     else this.feedback = { prediction, until: time + 1200 };
     return { ...prediction, state: this.evidence ? 'confirming' : 'rejected' };
@@ -1277,6 +1568,7 @@ class TrainingManager {
 
   recordStatic(name, label, samples, classifier) {
     if (!/^[A-Z0-9]$/.test(label) || DYNAMIC_CLASSES.has(label) || !Array.isArray(samples) || !samples.length || samples.length > 5 || !samples.every(validFeatures)) throw new Error('Captura estática inválida.');
+    if (['F','T'].includes(label) && !samples.every(validIndexGeometry)) throw new Error('Pontos do indicador inconsistentes. Reposicione a mão para recuperar o rastreamento antes de salvar F/T.');
     return this.record(name, label, { kind: 'static', samples }, classifier);
   }
   recordMotion(name, label, clip, classifier) {
@@ -1858,6 +2150,20 @@ function depthMessage(depth) {
   return messages[depth?.reason] ?? 'não foi possível confirmar o recuo. Afaste a mão e pare na posição final.';
 }
 function motionMessage(status) {
+  const interruptionReasons = { 'gap-too-long': 'o rastreador não recuperou pontos confiáveis dentro da janela permitida', 'hand-changed': 'o rótulo direita/esquerda mudou', 'unstable-handedness': 'o rótulo direita/esquerda ficou instável', 'position-jump': 'as coordenadas saltaram', 'missing-budget': 'houve muitos intervalos sem pontos confiáveis', 'too-long': 'a trajetória não foi concluída em 4,5 segundos', 'low-coverage': 'mais de 30% da trajetória ficou sem observações', 'too-short': 'a sequência não formou um movimento válido', 'camera-changed': 'a proporção da câmera mudou', 'invalid-time': 'o tempo dos frames ficou inválido' };
+  if (status.state === 'arming' && status.lastInterruption) {
+    const cause = status.lastInterruption.cause;
+    const detail = cause === 'unstable-handedness' ? ' O rótulo direita/esquerda não estabilizou.' : cause === 'position-jump' ? ' As coordenadas continuaram instáveis.' : cause?.startsWith('pinky-') ? ' Os pontos do mindinho não recuperaram uma geometria coerente.' : '';
+    return `Captura reiniciada: ${interruptionReasons[status.lastInterruption.reason] ?? status.lastInterruption.reason}.${detail} Prepare novamente a configuração inicial.`;
+  }
+  if (status.state === 'occluded') {
+    const detail = status.reason === 'unstable-handedness' ? 'Rótulo direita/esquerda instável' : status.reason === 'pinky-deformed' ? 'Geometria do mindinho inconsistente' : status.reason === 'pinky-jump' ? 'Salto nos pontos do mindinho' : status.reason === 'position-jump' ? 'Coordenadas instáveis' : 'Pontos ausentes ou inválidos';
+    return `${detail}. Início preservado; aguardando recuperação (${Math.ceil(status.remainingMs ?? 0)} ms restantes).`;
+  }
+  if (status.reason === 'initial-i-required') return 'J: prepare a configuração de I, com o mindinho estendido.';
+  if (status.state === 'recording' && status.jPhase && status.jPhase !== 'inactive') {
+    return ({ initial: 'J: início preservado. Desça com o mindinho.', descending: 'J: descida registrada. Termine o gancho para o lado e para cima.', hook: 'J: gancho observado. Pare na posição final.', complete: 'J: trajetória completa. Mantenha a posição final.' })[status.jPhase];
+  }
   if (status.state === 'confirming') return `Movimento: ${status.targetClass} · semelhança ${(status.confidenceProbability * 100).toFixed(1)}% · mantenha a pose final`;
   if (status.state === 'tracking-lost') {
     const reasons = { 'gap-too-long': 'A perda de rastreamento durou demais.', 'position-jump': 'A posição da mão mudou bruscamente.', 'scale-jump': 'O tamanho da mão mudou bruscamente.', 'hand-changed': 'A mão identificada mudou.', 'missing-budget': 'Muitos trechos ficaram sem rastreamento.' };
@@ -1892,6 +2198,7 @@ function showMotionState(status) {
   $('camera-stage').dataset.motionState = state;
   setText('motion-indicator', labels[state] ?? 'AGUARDANDO');
   setText('motion-cue', state === 'camera-off' ? 'Ative a câmera para começar.' : state === 'warmup' ? `Prepare-se. A captura começa em ${status.remaining ?? 2}…` : state === 'collecting' ? `Mantenha a pose estável… ${Math.round((status.progress ?? 0) * 100)}%` : state === 'complete' ? 'Captura concluída. Faça o sinal novamente para testar.' : state === 'recording' ? (capturing ? 'Gravando seu exemplo. Termine a trajetória e pare a mão.' : 'Lendo a trajetória. Termine o movimento e pare a mão.') : state === 'ready' ? 'Pronto para começar: faça o movimento agora.' : motionMessage(status));
+  if (state === 'recording' && status.jPhase && status.jPhase !== 'inactive') setText('motion-cue', motionMessage(status));
 }
 function cancelCountdown() {
   countdownEndsAt = null;

@@ -1,4 +1,4 @@
-import { SignClassifier, validFeatures, featureDistance } from './classifier.js';
+import { SignClassifier, validFeatures, featureDistance, validIndexGeometry } from './classifier.js';
 import { MotionClassifier, usableMotionClip, MOTION_LABELS } from './dynamic.js';
 import { DYNAMIC_CLASSES } from './trajectory.js';
 import { validExampleConfidence, trainingThreshold, confidenceThreshold } from './example-policy.js';
@@ -29,6 +29,7 @@ export class TrainingManager {
 
   recordStatic(name, label, samples, classifier) {
     if (!/^[A-Z0-9]$/.test(label) || DYNAMIC_CLASSES.has(label) || !Array.isArray(samples) || !samples.length || samples.length > 5 || !samples.every(validFeatures)) throw new Error('Captura estática inválida.');
+    if (['F','T'].includes(label) && !samples.every(validIndexGeometry)) throw new Error('Pontos do indicador inconsistentes. Reposicione a mão para recuperar o rastreamento antes de salvar F/T.');
     return this.record(name, label, { kind: 'static', samples }, classifier);
   }
   recordMotion(name, label, clip, classifier) {
