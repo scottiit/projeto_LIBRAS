@@ -60,7 +60,7 @@
         <div class="training-workspace">
           <div id="training-camera-slot"></div>
           <section class="capture-panel" aria-labelledby="capture-title">
-            <div class="capture-heading"><h2 id="capture-title">Seus exemplos</h2><span class="local-label">Só neste perfil</span></div>
+            <div class="capture-heading"><h2 id="capture-title">Exemplos de treinamento</h2><span class="local-label">Perfil global</span></div>
             <p id="personal-count" class="small"></p>
             <p id="training-pending" class="small" hidden></p>
             <div class="capture-actions"><button id="save-example" class="primary">Salvar um exemplo deste sinal</button><button id="cancel-calibration" class="quiet" hidden>Cancelar captura</button></div>
@@ -71,10 +71,32 @@
               <p id="training-buckets" class="small"></p><p id="training-retention" class="small"></p>
               <p id="training-storage" class="small"></p>
               <button id="export-motion" class="secondary">Exportar todo o treinamento (JSON)</button>
-              <label for="import-motion">Importar treinamento neste perfil</label><input type="file" id="import-motion" accept="application/json,.json" aria-describedby="motion-file-help">
-              <p id="motion-file-help" class="small">Até 16 MB. Inclui poses, movimentos e referências provisórias. Os exemplos são gravados em dataset_libras.csv pelo servidor Node. Limite de 30 por sinal, com até duas âncoras por faixa.</p>
+              <label for="import-motion">Importar treinamento no Perfil global</label><input type="file" id="import-motion" accept="application/json,.json" aria-describedby="motion-file-help">
+              <p id="motion-file-help" class="small">Até 16 MB. Inclui poses, movimentos, tolerâncias e referências provisórias. Os exemplos são gravados em dataset_libras.csv pelo servidor Node e compartilhados entre jogadores. Limite de 30 por sinal, com até duas âncoras por faixa.</p>
             </details>
           </section>
+          <details id="training-danger-zone" class="danger-zone">
+            <summary><span>Configurações avançadas</span><small>Danger Zone</small></summary>
+            <div class="danger-content">
+              <p id="danger-scope" class="small"></p>
+              <section aria-labelledby="threshold-title">
+                <h3 id="threshold-title">Tolerância para novos exemplos</h3>
+                <p class="small">Um limite menor aceita mais variações e pode admitir sinais incorretos. O reconhecimento no jogo mantém seus limites atuais.</p>
+                <p id="threshold-current" class="small"></p>
+                <label for="training-threshold">Novo mínimo de compatibilidade</label>
+                <div class="threshold-control"><input id="training-threshold" type="range" min="50" max="99" step="1" aria-describedby="threshold-help"><output id="training-threshold-value" for="training-threshold"></output></div>
+                <p id="threshold-help" class="small">De 50% a 99%. O escore precisa superar o valor aplicado. Mover o controle apenas prepara a alteração.</p>
+                <button id="apply-training-threshold" class="secondary">Revisar alteração</button>
+              </section>
+              <section aria-labelledby="batch-delete-title">
+                <h3 id="batch-delete-title">Excluir exemplos em lote</h3>
+                <p class="small">Remove até 5 exemplos da letra selecionada na base global. A exclusão manual também pode remover âncoras de diversidade.</p>
+                <div class="danger-actions"><button id="delete-oldest-examples" class="danger-button">Apagar 5 mais antigos</button><button id="delete-newest-examples" class="danger-button">Apagar 5 mais recentes</button></div>
+                <p class="small">Referências provisórias e imagens de referência são gerenciadas separadamente. Exporte um backup acima se precisar recuperar os exemplos depois.</p>
+              </section>
+              <p id="danger-status" class="small" role="status" aria-live="polite"></p>
+            </div>
+          </details>
           <div id="training-readout-slot"></div>
         </div>
         <details id="calibration-panel" class="reference-panel" open>
@@ -125,6 +147,11 @@
     <noscript><p class="error">Ative o JavaScript para usar este piloto.</p></noscript>
     <p id="boot-status" class="small">Carregando aplicativo… Se esta mensagem persistir, abra o index.html com o Live Server.</p>
   </main>
+  <dialog id="training-confirmation" class="confirmation-dialog" aria-labelledby="training-confirmation-title" aria-describedby="training-confirmation-description">
+    <h2 id="training-confirmation-title"></h2><p id="training-confirmation-description"></p>
+    <p id="training-confirmation-error" class="error" role="alert" hidden></p>
+    <div class="dialog-actions"><button id="cancel-training-action" class="secondary" autofocus>Cancelar</button><button id="confirm-training-action" class="primary">Confirmar</button></div>
+  </dialog>
   <footer><span>primeiros sinais</span><span>Aprender. Praticar. Conectar.</span><span>LIBRAS · Piloto 01</span></footer>
   <script src="js/boot.js"></script>
 </body>

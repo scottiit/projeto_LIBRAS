@@ -1,7 +1,8 @@
 import { encodeProfileExamples } from './storage-codec.js';
 import { ProfileStore } from './storage.js';
+import { GLOBAL_TRAINING_PROFILE } from './example-policy.js';
 
-const EMPTY = () => ({ version: 1, kind: 'libras-training', signExamples: {}, motionExamples: {}, legacyReferences: { signExamples: {}, motionExamples: {} }, exampleOrder: { signExamples: {}, motionExamples: {} }, pendingExamples: {} });
+const EMPTY = () => ({ version: 1, kind: 'libras-training', signExamples: {}, motionExamples: {}, legacyReferences: { signExamples: {}, motionExamples: {} }, exampleOrder: { signExamples: {}, motionExamples: {} }, pendingExamples: {}, trainingThresholds: {} });
 const bankNames = ['signExamples', 'motionExamples'];
 
 function orderedExamples(backup, bank, label) {
@@ -17,9 +18,10 @@ function trainingBanks(backup) {
     banks[bank] = Object.fromEntries([...labels].map(label => [label, orderedExamples(backup, bank, label)]));
   }
   banks.pendingExamples = backup.pendingExamples ?? {};
+  banks.trainingThresholds = backup.trainingThresholds ?? {};
   return banks;
 }
-const hasTraining = backup => bankNames.some(bank => Object.values(backup[bank] ?? {}).some(examples => examples.length) || Object.values(backup.legacyReferences?.[bank] ?? {}).some(examples => examples.length)) || Object.keys(backup.pendingExamples ?? {}).length > 0;
+const hasTraining = backup => bankNames.some(bank => Object.values(backup[bank] ?? {}).some(examples => examples.length) || Object.values(backup.legacyReferences?.[bank] ?? {}).some(examples => examples.length)) || Object.keys(backup.pendingExamples ?? {}).length > 0 || Object.keys(backup.trainingThresholds ?? {}).length > 0;
 
 /** file:// and HTTP have distinct browser storage. The file-page exporter
  * contains training fields only; reconstruct metadata solely for validation. */
@@ -48,9 +50,9 @@ export class SplitProfileStorage {
   }
   setItem(key, value) {
     const profile = JSON.parse(value);
-    const { signExamples, motionExamples, pendingExamples, ...metadata } = profile;
+    const { signExamples, motionExamples, pendingExamples, trainingThresholds, ...metadata } = profile;
     this.browserStorage.setItem(key, JSON.stringify(metadata));
-    this.training.set(key, { signExamples, motionExamples, pendingExamples });
+    this.training.set(key, { signExamples, motionExamples, pendingExamples, trainingThresholds });
   }
   seed(name, backup) {
     const key = new ProfileStore(this).key(name);
@@ -90,31 +92,44 @@ function missingFromCsv(previous, csv) {
   for (const [label, pending] of Object.entries(previous.pendingExamples ?? {})) {
     if (!csv.pendingExamples?.[label] && !csv.signExamples?.[label]?.length && !csv.motionExamples?.[label]?.length) missing.pendingExamples[label] = pending;
   }
+  for (const [label, threshold] of Object.entries(previous.trainingThresholds ?? {})) if (!Object.hasOwn(csv.trainingThresholds ?? {}, label)) missing.trainingThresholds[label] = threshold;
   return missing;
 }
 
 export class CsvTrainingRepository {
-  constructor(store, splitStorage, browserStorage) {
+  constructor(store, splitStorage, browserStorage, { global = false } = {}) {
     Object.assign(this, { store, splitStorage, browserStorage });
+    this.global = global;
+    this.loadedProfiles = new Set();
     this.committed = new Map();
   }
+  datasetName(name) { return this.global ? GLOBAL_TRAINING_PROFILE : name; }
+  validateScope(backup) {
+    if (this.global && backup?.trainingScope !== GLOBAL_TRAINING_PROFILE) throw new Error('O servidor está desatualizado para o Perfil global. Pare o servidor antigo (Ctrl+C), execute npm start novamente e recarregue a página. Os exemplos existentes no CSV foram preservados.');
+    return backup;
+  }
+  seed(name, backup) {
+    this.loadedProfiles.add(name);
+    for (const target of this.global ? this.loadedProfiles : [name]) this.splitStorage.seed(target, backup);
+  }
   async load(name) {
-    const key = this.store.key(name);
-    const original = this.browserStorage.getItem(key);
+    const key = this.store.key(this.datasetName(name));
+    const browserKey = this.store.key(name);
+    const original = this.browserStorage.getItem(browserKey);
     const oldProfile = original ? JSON.parse(original) : null;
     const hadBrowserTraining = Boolean(oldProfile && ('signExamples' in oldProfile || 'motionExamples' in oldProfile || 'pendingExamples' in oldProfile));
     const legacy = hadBrowserTraining
       ? new ProfileStore(this.browserStorage).exportTraining(name) : EMPTY();
-    const csv = await request(`/api/training?profile=${encodeURIComponent(name)}`);
-    this.splitStorage.seed(name, csv);
+    const csv = this.validateScope(await request(`/api/training?profile=${encodeURIComponent(this.datasetName(name))}`));
+    this.seed(name, csv);
     this.committed.set(key, csv);
     if (hasTraining(legacy)) {
       const missing = missingFromCsv(legacy, csv);
       if (hasTraining(missing)) {
         try { this.store.importTraining(name, missing); await this.persist(name); }
         catch (error) {
-          this.splitStorage.seed(name, csv);
-          this.browserStorage.setItem(key, original);
+          this.seed(name, csv);
+          this.browserStorage.setItem(browserKey, original);
           throw new Error(`Não foi possível migrar os exemplos antigos para o CSV: ${error.message}`);
         }
       } else this.store.write(this.store.read(name));
@@ -122,13 +137,13 @@ export class CsvTrainingRepository {
     return this.store.read(name);
   }
   async persist(name) {
-    const key = this.store.key(name);
+    const key = this.store.key(this.datasetName(name));
     const before = this.committed.get(key) ?? EMPTY();
     try {
-      const accepted = await request('/api/training', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: name, training: this.store.exportTraining(name) }) });
-      this.splitStorage.seed(name, accepted);
+      const accepted = this.validateScope(await request('/api/training', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: this.datasetName(name), training: this.store.exportTraining(name) }) }));
+      this.seed(name, accepted);
       this.committed.set(key, accepted);
       return this.store.read(name);
-    } catch (error) { this.splitStorage.seed(name, before); throw error; }
+    } catch (error) { this.seed(name, before); throw error; }
   }
 }

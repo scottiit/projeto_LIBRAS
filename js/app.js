@@ -4,9 +4,10 @@ import { GameEngine } from './engine.js';
 import { VisionController, StaticClassifierMock } from './vision.js';
 import { SIGN_REFERENCES } from './dataset.js';
 import { DYNAMIC_CLASSES } from './trajectory.js';
-import { EXAMPLE_LIMIT, summarizeExamples, confidenceThreshold, validExampleConfidence } from './example-policy.js';
+import { EXAMPLE_LIMIT, summarizeExamples, confidenceThreshold, validExampleConfidence, trainingThreshold } from './example-policy.js';
 import { TrainingManager } from './training.js';
 import { SplitProfileStorage, CsvTrainingRepository, trainingFromBrowserProfiles } from './csv-training.js';
+import { TrainingDangerZone } from './training-danger-zone.js';
 
 const $ = id => document.getElementById(id);
 const wideLayout = window.matchMedia('(min-width: 900px)');
@@ -23,9 +24,34 @@ let debugPending = false, dropUntil = 0, session = 0, lastMockAt = 0;
 let lastMotionAlternatives = null;
 let countdownEndsAt = null;
 let pendingTrainingLabel = null;
+const dangerZone = new TrainingDangerZone(document, () => {
+  if (!profile || screen !== 'training') return null;
+  const label = $('calibration-class').value;
+  const current = store.read(profile.name);
+  const bank = DYNAMIC_CLASSES.has(label) || label === 'UNKNOWN' ? 'motionExamples' : 'signExamples';
+  return { name: profile.name, label, records: current?.[bank]?.[label] ?? [], threshold: trainingThreshold(current, label), busy: Boolean(vision.calibration) || savingTraining };
+}, async operation => {
+  const token = session;
+  savingTraining = true; renderReference();
+  try {
+    let removedCount = 0;
+    if (operation.kind === 'threshold') store.setTrainingThreshold(operation.name, operation.label, operation.value);
+    else ({ removedCount } = store.deleteTrainingBatch(operation.name, operation.label, operation.kind, operation.count));
+    const saved = await trainingRepository.persist(operation.name);
+    if (token === session && profile?.name === operation.name) {
+      profile = saved;
+      vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples);
+      $('danger-status').textContent = operation.kind === 'threshold' ? `Tolerância de ${operation.label} aplicada: mais de ${Math.round(operation.value * 100)}%. Salva no Perfil global.` : `${removedCount} ${removedCount === 1 ? 'exemplo excluído' : 'exemplos excluídos'} de ${operation.label} no CSV global.`;
+    }
+  } catch (error) {
+    if (profile?.name === operation.name) profile = store.read(operation.name);
+    throw error;
+  } finally { savingTraining = false; if (token === session && profile?.name === operation.name) renderReference(); }
+}, report);
 function report(error) { $('error').textContent = error.message || String(error); $('error').hidden = false; }
 function clearError() { $('error').hidden = true; }
 function showScreen(name, focus) {
+  if (name !== 'training') dangerZone.cancel();
   if (screen === 'training' && name !== 'training') $('reference-media').querySelector('video')?.pause();
   screen = name;
   document.body.dataset.screen = name;
@@ -88,10 +114,10 @@ const vision = new VisionController($('camera'), $('overlay'), (prediction, capt
       if (token !== session || profile?.name !== name || screen !== 'training') return;
       profile = store.read(name);
       vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples);
-      if (admission.state === 'pending') $('calibration-status').textContent = `Primeira execução provisória salva neste perfil. Grave novamente: as duas precisam superar ${confidenceThreshold(status.label) * 100}% de semelhança entre si. Isso mede repetibilidade, não correção do sinal.`;
-      else if (admission.state === 'rejected') $('calibration-status').textContent = `Nenhum exemplo entrou na base. ${Number.isFinite(admission.confidence) ? `Escore de comparação: ${formatSimilarity(admission.confidence)}; precisamos de mais de ${confidenceThreshold(status.label) * 100}% e uma correspondência sem ambiguidade para ${status.label}.` : 'Comparação indisponível: referência ausente ou sequência inválida. Recomece a referência.'}${admission.matchedLabel && admission.matchedLabel !== status.label ? ` A classe mais próxima foi ${admission.matchedLabel}.` : ''}${admission.provisional ? ' A primeira execução provisória foi mantida; repita ou recomece a referência.' : ''}`;
+      if (admission.state === 'pending') $('calibration-status').textContent = `Primeira execução provisória salva no Perfil global. Grave novamente: as duas precisam superar ${Math.round(trainingThreshold(profile, status.label) * 100)}% de semelhança entre si. Isso mede repetibilidade, não correção do sinal.`;
+      else if (admission.state === 'rejected') $('calibration-status').textContent = `Nenhum exemplo entrou na base. ${Number.isFinite(admission.confidence) ? `Escore de comparação: ${formatSimilarity(admission.confidence)}; precisamos de mais de ${Math.round(trainingThreshold(profile, status.label) * 100)}% e uma correspondência sem ambiguidade para ${status.label}.` : 'Comparação indisponível: referência ausente ou sequência inválida. Recomece a referência.'}${admission.matchedLabel && admission.matchedLabel !== status.label ? ` A classe mais próxima foi ${admission.matchedLabel}.` : ''}${admission.provisional ? ' A primeira execução provisória foi mantida; repita ou recomece a referência.' : ''}`;
       else {
-        $('calibration-status').textContent = `${admission.savedCount === 1 ? '1 exemplo salvo' : `${admission.savedCount} exemplos salvos`} em dataset_libras.csv para ${profile.name}. Menor semelhança: ${(admission.confidence * 100).toFixed(1)}%.${admission.comparisonSource === 'repeatability' ? ' A primeira e a segunda execução foram aprovadas: um exemplo de cada captura.' : ''}`;
+        $('calibration-status').textContent = `${admission.savedCount === 1 ? '1 exemplo salvo' : `${admission.savedCount} exemplos salvos`} em dataset_libras.csv no Perfil global. Menor semelhança: ${(admission.confidence * 100).toFixed(1)}%.${admission.comparisonSource === 'repeatability' ? ' A primeira e a segunda execução foram aprovadas: um exemplo de cada captura.' : ''}`;
         if (status.depth?.warnings?.length) $('calibration-status').textContent += ' A variação dos dedos ou da palma foi preservada no exemplo.';
         if (status.clip?.occlusions?.length) $('calibration-status').textContent += ' Os intervalos de oclusão ficaram registrados no exemplo.';
       }
@@ -349,7 +375,8 @@ function renderReference() {
   $('motion-tools').hidden = !temporal;
   $('motion-guide').hidden = !temporal;
   const records = (temporal ? profile?.motionExamples?.[label] : profile?.signExamples?.[label]) ?? [];
-  const summary = summarizeExamples(records, label);
+  const threshold = trainingThreshold(profile, label);
+  const summary = summarizeExamples(records, label, threshold);
   $('personal-count').textContent = `${summary.total} de ${EXAMPLE_LIMIT} exemplos salvos para ${label === 'UNKNOWN' ? 'rejeição' : label}.`;
   if (label === 'X') {
     const usable = vision.dynamic.classifier.examples.X.length;
@@ -357,17 +384,18 @@ function renderReference() {
     $('personal-count').textContent += ` ${usable} disponíveis para reconhecimento.${saved > usable ? ` ${saved - usable} anteriores precisam ser regravados com a leitura de profundidade.` : ''}`;
   }
   $('training-buckets').textContent = Object.entries(summary.buckets).map(([range, bucket]) => `${range}%: ${bucket.protected}/2 âncoras (${bucket.count} exemplos)`).join(' · ');
-  $('training-retention').textContent = `Mínimo para ${label}: mais de ${confidenceThreshold(label) * 100}%. Até 6 dos 30 exemplos (20%) são protegidos: dois por faixa. Ao atingir 30, sai o mais antigo que preserve essa cota.${summary.unscored ? ` ${summary.unscored} exemplos antigos sem escore foram preservados e não contam como âncoras.` : ''} As faixas excluem o limite inferior e incluem o superior. Faixas incompletas aguardam exemplos; os escores não são alterados para preenchê-las.`;
+  $('training-retention').textContent = `Mínimo para novos exemplos de ${label}: mais de ${Math.round(threshold * 100)}%. Até 6 dos 30 exemplos (20%) são protegidos: dois por faixa. Ao atingir 30, sai o mais antigo que preserve essa cota.${summary.unscored ? ` ${summary.unscored} exemplos sem escore ou abaixo do limite atual são preservados, mas não contam como âncoras.` : ''} As faixas excluem o limite inferior e incluem o superior. Faixas incompletas aguardam exemplos; os escores não são alterados para preenchê-las.`;
   const pending = profile?.pendingExamples?.[label];
   $('training-pending').hidden = !pending;
   $('training-pending').textContent = 'Há uma primeira execução provisória salva. Grave a segunda para comparar; ela ainda não participa do reconhecimento.';
   $('reset-training-reference').hidden = !pending;
   $('reset-training-reference').disabled = busy;
-  $('training-storage').textContent = `Exemplos deste perfil: dataset_libras.csv, na pasta do projeto. Perfis e recordes: neste navegador. Use o servidor Node local para gravar e recarregar o treinamento.`;
+  $('training-storage').textContent = 'Exemplos e tolerâncias: Perfil global em dataset_libras.csv, compartilhados entre jogadores. Perfis e recordes: neste navegador. Use o servidor Node local para gravar e recarregar o treinamento.';
   if (label === 'UNKNOWN') $('reference-caption').textContent = 'Grave movimentos parecidos, mas incorretos (ex.: trajetória incompleta ou invertida), para ajudar o sistema a rejeitá-los.';
   $('remove-motion').disabled = busy || !profile?.motionExamples?.[label]?.length;
   $('import-motion').disabled = busy;
-  $('export-motion').disabled = busy || ![profile?.motionExamples, profile?.signExamples, profile?.pendingExamples].some(bank => bank && Object.keys(bank).length);
+  $('export-motion').disabled = busy || ![profile?.motionExamples, profile?.signExamples, profile?.pendingExamples, profile?.trainingThresholds].some(bank => bank && Object.keys(bank).length);
+  dangerZone.render();
 }
 function finishCalibration() {
   vision.cancelCalibration();
@@ -405,7 +433,7 @@ $('calibration-class').addEventListener('change', () => {
   if (screen !== 'training') return;
   vision.setTarget($('calibration-class').value === 'UNKNOWN' ? 'K' : $('calibration-class').value);
   $('recognition-hint').textContent = `Teste livre: ${$('calibration-class').value === 'UNKNOWN' ? 'movimento de rejeição' : $('calibration-class').value}.`;
-  $('calibration-status').textContent = ''; renderReference();
+  $('calibration-status').textContent = ''; $('danger-status').textContent = ''; renderReference();
   if (DYNAMIC_CLASSES.has(vision.target)) showMotionState({ state: 'arming' });
   else { $('motion-indicator').hidden = true; $('motion-cue').hidden = true; }
 });
@@ -597,7 +625,7 @@ async function update(now) {
 try {
   const splitStorage = new SplitProfileStorage(localStorage);
   store = new ProfileStore(splitStorage); training = new TrainingManager(store);
-  trainingRepository = new CsvTrainingRepository(store, splitStorage, localStorage);
+  trainingRepository = new CsvTrainingRepository(store, splitStorage, localStorage, { global: true });
   listProfiles();
   const activeName = localStorage.getItem(ACTIVE_PROFILE_KEY);
   if (activeName && store.read(activeName)) void login(activeName);

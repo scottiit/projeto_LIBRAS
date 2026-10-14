@@ -1,7 +1,7 @@
 import { SignClassifier, validFeatures, featureDistance } from './classifier.js';
 import { MotionClassifier, usableMotionClip, MOTION_LABELS } from './dynamic.js';
 import { DYNAMIC_CLASSES } from './trajectory.js';
-import { validExampleConfidence } from './example-policy.js';
+import { validExampleConfidence, trainingThreshold, confidenceThreshold } from './example-policy.js';
 
 /** One execution occupies one slot. Keep its medoid: the observed frame with
  * the smallest total distance to the other observations. Unlike averaging,
@@ -43,21 +43,22 @@ export class TrainingManager {
     comparator.personal = [...classifier.personal, { label, features: staticRepresentative(candidate.samples), source: 'repeatability' }];
     return comparator;
   }
-  evaluate(candidate, label, classifier) {
+  evaluate(candidate, label, classifier, threshold = confidenceThreshold(label)) {
     const predictions = candidate.kind === 'motion' ? [classifier.predict(candidate.clip)] : candidate.samples.map(features => classifier.predictFeatures(features, /^\d$/.test(label) ? 'numbers' : 'alphabet'));
     return predictions.map(prediction => {
       // UNKNOWN is an explicit negative class: it can seed rejection examples,
       // but its accepted comparison must never become positive game evidence.
-      const matchedLabel = label === 'UNKNOWN' ? prediction.alternatives?.[0]?.label : prediction.targetClass;
+      const matchedLabel = candidate.kind === 'motion' ? prediction.alternatives?.[0]?.label : prediction.targetClass;
       const confidence = candidate.kind === 'motion' ? prediction.similarityScore : prediction.confidenceProbability;
       // Rejected game evidence deliberately has confidenceProbability=0. It
       // must not overwrite the actual comparison score in training feedback.
       // Admission still requires an accepted class (or explicit UNKNOWN).
-      return { confidence, matchedLabel: matchedLabel ?? prediction.alternatives?.[0]?.label ?? null, reason: prediction.reason, accepted: matchedLabel === label && validExampleConfidence(confidence, label) };
+      const validComparison = !['invalid', 'invalid-comparison', 'no-examples', 'depth-required'].includes(prediction.reason);
+      return { confidence, matchedLabel: matchedLabel ?? null, reason: prediction.reason, accepted: validComparison && matchedLabel === label && validExampleConfidence(confidence, label, threshold) };
     });
   }
-  records(candidate, assessments, capturedAt, comparisonSource) {
-    const metadata = index => ({ confidenceProbability: assessments[index].confidence, capturedAt, comparisonSource });
+  records(candidate, assessments, capturedAt, comparisonSource, admissionThreshold) {
+    const metadata = index => ({ confidenceProbability: assessments[index].confidence, capturedAt, comparisonSource, admissionThreshold });
     if (candidate.kind === 'motion') return [{ ...candidate.clip, ...metadata(0) }];
     // The capture's weakest admitted observation determines its quality band;
     // choosing a representative must not inflate the stored confidence.
@@ -67,6 +68,7 @@ export class TrainingManager {
     const profile = this.store.read(name);
     if (!profile) throw new Error('Perfil não encontrado.');
     const now = this.clock();
+    const threshold = trainingThreshold(profile, label);
     let assessments, records, source = 'reference';
     if (!classifier.hasClass(label)) {
       const pending = profile.pendingExamples?.[label];
@@ -75,15 +77,15 @@ export class TrainingManager {
       }
       // Evaluate both directions to avoid admitting the first execution solely
       // because the second happened to match one of its easiest observations.
-      assessments = this.evaluate(candidate, label, this.comparatorWithReference(classifier, label, pending));
-      const previousAssessments = this.evaluate(pending, label, this.comparatorWithReference(classifier, label, candidate));
+      assessments = this.evaluate(candidate, label, this.comparatorWithReference(classifier, label, pending), threshold);
+      const previousAssessments = this.evaluate(pending, label, this.comparatorWithReference(classifier, label, candidate), threshold);
       if ([...assessments, ...previousAssessments].some(item => !item.accepted)) return this.rejected(profile, [...assessments, ...previousAssessments], true);
       source = 'repeatability';
-      records = [...this.records(pending, previousAssessments, pending.createdAt, source), ...this.records(candidate, assessments, now, source)];
+      records = [...this.records(pending, previousAssessments, pending.createdAt, source, threshold), ...this.records(candidate, assessments, now, source, threshold)];
     } else {
-      assessments = this.evaluate(candidate, label, classifier);
+      assessments = this.evaluate(candidate, label, classifier, threshold);
       if (assessments.some(item => !item.accepted)) return this.rejected(profile, assessments, false);
-      records = this.records(candidate, assessments, now, source);
+      records = this.records(candidate, assessments, now, source, threshold);
     }
     const saved = candidate.kind === 'motion' ? this.store.saveMotions(name, label, records) : this.store.saveExamples(name, label, records);
     return { state: 'saved', profile: saved, savedCount: records.length, confidence: Math.min(...records.map(record => record.confidenceProbability)), comparisonSource: source };

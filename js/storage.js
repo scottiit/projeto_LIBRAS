@@ -1,6 +1,6 @@
 import { MOTION_VERSION, MOTION_LABELS, validMotionClip } from './dynamic.js';
 import { DYNAMIC_CLASSES } from './trajectory.js';
-import { EXAMPLE_LIMIT, retainExamples, validExampleConfidence } from './example-policy.js';
+import { EXAMPLE_LIMIT, retainExamples, validExampleConfidence, validTrainingThreshold, trainingThreshold, recordAdmissionThreshold } from './example-policy.js';
 import { encodeProfileExamples, decodeProfileExamples } from './storage-codec.js';
 
 const PREFIX = 'libras:v1:profile:';
@@ -10,13 +10,13 @@ const validStaticLabel = label => /^[A-Z0-9]$/.test(label) && !DYNAMIC_CLASSES.h
 const validTrainingLabel = label => validStaticLabel(label) || MOTION_LABELS.includes(label);
 const validStoredVector = vector => Array.isArray(vector) && vector.length === 63 && vector.every(value => Number.isFinite(value) && Math.abs(value) <= 20);
 const legacyStaticExample = example => validStoredVector(example) && !Object.hasOwn(example, 'confidenceProbability');
-const validExampleMetadata = (example, label) => isRecord(example) && validExampleConfidence(example.confidenceProbability, label) && Number.isFinite(example.capturedAt) && example.capturedAt >= 0 && ['reference', 'repeatability'].includes(example.comparisonSource);
+const validExampleMetadata = (example, label) => isRecord(example) && validExampleConfidence(example.confidenceProbability, label, recordAdmissionThreshold(example, label)) && Number.isFinite(example.capturedAt) && example.capturedAt >= 0 && ['reference', 'repeatability'].includes(example.comparisonSource);
 const approvedStaticExample = (example, label) => validExampleMetadata(example, label) && validStoredVector(example.features);
 const approvedMotionExample = (example, label) => validExampleMetadata(example, label) && validMotionClip(example);
 const legacyMotionExample = example => validMotionClip(example) && !Object.hasOwn(example, 'confidenceProbability');
 const storedStaticExample = (example, label) => legacyStaticExample(example) || approvedStaticExample(example, label);
 const storedMotionExample = (example, label) => legacyMotionExample(example) || approvedMotionExample(example, label);
-const copyExampleMetadata = example => ({ confidenceProbability: example.confidenceProbability, capturedAt: example.capturedAt, comparisonSource: example.comparisonSource });
+const copyExampleMetadata = example => ({ confidenceProbability: example.confidenceProbability, capturedAt: example.capturedAt, comparisonSource: example.comparisonSource, ...(Object.hasOwn(example, 'admissionThreshold') ? { admissionThreshold: example.admissionThreshold } : {}) });
 const copyStaticExample = example => Array.isArray(example) ? [...example] : { features: [...example.features], ...copyExampleMetadata(example) };
 const copyMotionExample = example => ({ version: example.version, durationMs: example.durationMs, frames: example.frames.map(frame => [...frame]), ...(example.occlusions ? { occlusions: example.occlusions.map(gap => ({ ...gap })) } : {}), ...(Object.hasOwn(example, 'confidenceProbability') ? copyExampleMetadata(example) : {}) });
 
@@ -30,7 +30,7 @@ const copyPendingExample = pending => pending.kind === 'static'
   : { kind: 'motion', clip: copyMotionExample(pending.clip), createdAt: pending.createdAt };
 
 function validateTrainingBank(bank, labelValidator, exampleValidator) {
-  if (!isRecord(bank) || Object.entries(bank).some(([label, examples]) => !labelValidator(label) || !Array.isArray(examples) || examples.length > EXAMPLE_LIMIT || !examples.every(example => exampleValidator(example, label)))) throw new Error('Coleção de exemplos inválida; novos registros precisam superar o limite da classe (75% para J; 85% para as demais) e ter metadados válidos.');
+  if (!isRecord(bank) || Object.entries(bank).some(([label, examples]) => !labelValidator(label) || !Array.isArray(examples) || examples.length > EXAMPLE_LIMIT || !examples.every(example => exampleValidator(example, label)))) throw new Error('Coleção de exemplos inválida; os registros precisam superar seu limite de admissão registrado e ter metadados válidos.');
 }
 
 /** Restore optional explicit FIFO order without trusting client timestamps. */
@@ -98,12 +98,31 @@ export class ProfileStore {
     this.write(profile);
     return profile;
   }
+  setTrainingThreshold(name, label, threshold) {
+    if (!validTrainingLabel(label) || !validTrainingThreshold(threshold)) throw new Error('Use um limite inteiro entre 50% e 99% para uma classe válida.');
+    const profile = this.requireProfile(name);
+    profile.trainingThresholds = { ...(profile.trainingThresholds ?? {}), [label]: threshold };
+    this.write(profile);
+    return profile;
+  }
+  deleteTrainingBatch(name, label, direction, maximum = 5) {
+    if (!validTrainingLabel(label) || !['oldest', 'newest'].includes(direction) || !Number.isInteger(maximum) || maximum < 1 || maximum > 5) throw new Error('Exclusão de exemplos inválida.');
+    const profile = this.requireProfile(name);
+    const bank = validStaticLabel(label) ? 'signExamples' : 'motionExamples';
+    const examples = profile[bank]?.[label] ?? [];
+    const removedCount = Math.min(maximum, examples.length);
+    if (removedCount) {
+      profile[bank][label] = direction === 'oldest' ? examples.slice(removedCount) : examples.slice(0, examples.length - removedCount);
+      this.write(profile);
+    }
+    return { profile, removedCount };
+  }
   saveExamples(name, label, records) {
-    if (!validStaticLabel(label) || !Array.isArray(records) || !records.length || records.length > EXAMPLE_LIMIT || !records.every(example => approvedStaticExample(example, label))) throw new Error('Exemplos inválidos: a semelhança deve ser maior que 85%, com origem e instante da avaliação.');
+    if (!validStaticLabel(label) || !Array.isArray(records) || !records.length || records.length > EXAMPLE_LIMIT || !records.every(example => approvedStaticExample(example, label))) throw new Error('Exemplos inválidos: supere o limite de admissão registrado, com origem e instante da avaliação.');
     const profile = this.requireProfile(name);
     if (!isRecord(profile.signExamples)) profile.signExamples = {};
     const previous = Array.isArray(profile.signExamples[label]) ? profile.signExamples[label].filter(example => storedStaticExample(example, label)) : [];
-    profile.signExamples[label] = retainExamples(previous, records.map(copyStaticExample), label);
+    profile.signExamples[label] = retainExamples(previous, records.map(copyStaticExample), label, trainingThreshold(profile, label));
     if (isRecord(profile.pendingExamples)) delete profile.pendingExamples[label];
     this.write(profile);
     return profile;
@@ -119,7 +138,7 @@ export class ProfileStore {
   }
   saveMotion(name, label, clip) { return this.saveMotions(name, label, [clip]); }
   saveMotions(name, label, clips) {
-    if (!MOTION_LABELS.includes(label) || !Array.isArray(clips) || !clips.length || clips.length > EXAMPLE_LIMIT || !clips.every(clip => approvedMotionExample(clip, label))) throw new Error('Movimentos inválidos: supere o limite da classe (75% para J; 85% para as demais), com origem e instante da avaliação.');
+    if (!MOTION_LABELS.includes(label) || !Array.isArray(clips) || !clips.length || clips.length > EXAMPLE_LIMIT || !clips.every(clip => approvedMotionExample(clip, label))) throw new Error('Movimentos inválidos: supere o limite de admissão registrado, com origem e instante da avaliação.');
     return this.importMotion(name, { version: MOTION_VERSION, examples: { [label]: clips } });
   }
   importMotion(name, payload) {
@@ -129,7 +148,7 @@ export class ProfileStore {
     if (!isRecord(profile.motionExamples)) profile.motionExamples = {};
     for (const [label, clips] of Object.entries(payload.examples)) {
       const previous = Array.isArray(profile.motionExamples[label]) ? profile.motionExamples[label].filter(example => storedMotionExample(example, label)) : [];
-      profile.motionExamples[label] = retainExamples(previous, clips.map(copyMotionExample), label);
+      profile.motionExamples[label] = retainExamples(previous, clips.map(copyMotionExample), label, trainingThreshold(profile, label));
       if (clips.length && isRecord(profile.pendingExamples)) delete profile.pendingExamples[label];
     }
     this.write(profile);
@@ -159,11 +178,11 @@ export class ProfileStore {
   }
   exportTraining(name) {
     const profile = this.requireProfile(name);
-    const backup = { version: 1, kind: 'libras-training', signExamples: {}, motionExamples: {}, legacyReferences: { signExamples: {}, motionExamples: {} }, exampleOrder: { signExamples: {}, motionExamples: {} }, pendingExamples: {} };
+    const backup = { version: 1, kind: 'libras-training', signExamples: {}, motionExamples: {}, legacyReferences: { signExamples: {}, motionExamples: {} }, exampleOrder: { signExamples: {}, motionExamples: {} }, pendingExamples: {}, trainingThresholds: { ...(profile.trainingThresholds ?? {}) } };
     for (const [bank, isValid, clone, isApproved] of [['signExamples', storedStaticExample, copyStaticExample, approvedStaticExample], ['motionExamples', storedMotionExample, copyMotionExample, approvedMotionExample]]) {
       for (const [label, examples] of Object.entries(profile[bank] ?? {})) {
         if (!(bank === 'signExamples' ? validStaticLabel(label) : MOTION_LABELS.includes(label)) || !Array.isArray(examples)) continue;
-        const valid = retainExamples(examples.filter(example => isValid(example, label)), [], label);
+        const valid = retainExamples(examples.filter(example => isValid(example, label)), [], label, trainingThreshold(profile, label));
         backup[bank][label] = valid.filter(example => isApproved(example, label)).map(clone);
         backup.legacyReferences[bank][label] = valid.filter(example => !isApproved(example, label)).map(clone);
         backup.exampleOrder[bank][label] = valid.map(example => isApproved(example, label) ? 'approved' : 'legacy');
@@ -186,6 +205,9 @@ export class ProfileStore {
     const order = payload.exampleOrder ?? {};
     if (!isRecord(order) || Object.keys(order).some(bank => !['signExamples', 'motionExamples'].includes(bank))) throw new Error('Ordem dos exemplos no backup inválida.');
     const profile = this.requireProfile(name);
+    const thresholds = payload.trainingThresholds ?? {};
+    if (!isRecord(thresholds) || Object.entries(thresholds).some(([label, value]) => !validTrainingLabel(label) || !validTrainingThreshold(value))) throw new Error('Limites de treinamento inválidos no backup.');
+    profile.trainingThresholds = { ...(profile.trainingThresholds ?? {}), ...thresholds };
     for (const [bank, incoming, isValid, clone] of [['signExamples', signs, storedStaticExample, copyStaticExample], ['motionExamples', motions, storedMotionExample, copyMotionExample]]) {
       const previousLegacy = legacy[bank] ?? {};
       if (order[bank] !== undefined && (!isRecord(order[bank]) || Object.keys(order[bank]).some(label => !Object.hasOwn(incoming, label) && !Object.hasOwn(previousLegacy, label)))) throw new Error('Ordem dos exemplos no backup inválida.');
@@ -197,7 +219,7 @@ export class ProfileStore {
         let retained = Array.isArray(profile[bank][label]) ? profile[bank][label].filter(example => isValid(example, label)) : [];
         for (const example of ordered) {
           const copy = clone(example);
-          retained = validExampleConfidence(copy?.confidenceProbability, label) ? retainExamples(retained, [copy], label) : retainExamples([...retained, copy], [], label);
+          retained = validExampleConfidence(copy?.confidenceProbability, label, recordAdmissionThreshold(copy, label)) ? retainExamples(retained, [copy], label, trainingThreshold(profile, label)) : retainExamples([...retained, copy], [], label, trainingThreshold(profile, label));
         }
         profile[bank][label] = retained;
         if (approved.length && isRecord(profile.pendingExamples)) delete profile.pendingExamples[label];

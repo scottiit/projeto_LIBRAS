@@ -1,6 +1,7 @@
 import { readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { ProfileStore } from '../js/storage.js';
+import { GLOBAL_TRAINING_PROFILE } from '../js/example-policy.js';
 
 const file = new URL('../dataset_libras.csv', import.meta.url);
 const COORDINATES = Array.from({ length: 63 }, (_, index) => String(index));
@@ -8,7 +9,8 @@ const BASE_HEADER = [...COORDINATES, 'label'];
 const EXTRA_HEADER = ['record_type', 'profile', 'confidence', 'captured_at', 'comparison_source', 'payload_json'];
 const HEADER = [...BASE_HEADER, ...EXTRA_HEADER];
 const EMPTY_COORDINATES = Array(63).fill('');
-const emptyBackup = () => ({ version: 1, kind: 'libras-training', signExamples: {}, motionExamples: {}, legacyReferences: { signExamples: {}, motionExamples: {} }, exampleOrder: { signExamples: {}, motionExamples: {} }, pendingExamples: {} });
+const emptyBackup = () => ({ version: 1, kind: 'libras-training', signExamples: {}, motionExamples: {}, legacyReferences: { signExamples: {}, motionExamples: {} }, exampleOrder: { signExamples: {}, motionExamples: {} }, pendingExamples: {}, trainingThresholds: {} });
+const scopedTraining = (profileName, backup) => profileName === GLOBAL_TRAINING_PROFILE ? { ...backup, trainingScope: GLOBAL_TRAINING_PROFILE } : backup;
 
 function parseCsv(source) {
   const rows = []; let row = [], field = '', quoted = false;
@@ -46,6 +48,8 @@ function restoreTraining(rows, profileName) {
     const [type, profile, confidence, capturedAt, comparisonSource, payload] = row.slice(64);
     if (profile !== profileName || !type) continue;
     const label = row[63];
+    if (type === 'global-state') continue;
+    if (type === 'threshold') { backup.trainingThresholds[label] = JSON.parse(payload); continue; }
     if (type === 'pending-static' || type === 'pending-motion') {
       backup.pendingExamples[label] = JSON.parse(payload);
       continue;
@@ -58,6 +62,10 @@ function restoreTraining(rows, profileName) {
     let record = bank === 'signExamples' ? row.slice(0, 63).map(Number) : JSON.parse(payload);
     if (!legacy) {
       const metadata = { confidenceProbability: Number(confidence), capturedAt: Number(capturedAt), comparisonSource };
+      if (bank === 'signExamples' && payload) {
+        const extra = JSON.parse(payload);
+        if (Object.hasOwn(extra, 'admissionThreshold')) metadata.admissionThreshold = extra.admissionThreshold;
+      }
       record = bank === 'signExamples' ? { features: record, ...metadata } : { ...record, ...metadata };
     }
     records[label].push(record); order[label].push(legacy ? 'legacy' : 'approved');
@@ -79,7 +87,7 @@ function rowsForTraining(profileName, backup) {
   const append = (label, type, example, metadata = null) => rows.push([
     ...(type.endsWith('static') && !type.startsWith('pending-') ? (Array.isArray(example) ? example : example.features) : EMPTY_COORDINATES),
     label, type, profileName, metadata?.confidenceProbability ?? '', metadata?.capturedAt ?? '', metadata?.comparisonSource ?? '',
-    type.endsWith('static') && !type.startsWith('pending-') ? '' : JSON.stringify(example),
+    type.endsWith('static') && !type.startsWith('pending-') ? (Object.hasOwn(example, 'admissionThreshold') ? JSON.stringify({ admissionThreshold: example.admissionThreshold }) : '') : JSON.stringify(example),
   ]);
   for (const [bank, approvedType, legacyType] of [['signExamples', 'static', 'legacy-static'], ['motionExamples', 'motion', 'legacy-motion']]) {
     const labels = new Set([...Object.keys(backup[bank]), ...Object.keys(backup.legacyReferences[bank])]);
@@ -93,6 +101,10 @@ function rowsForTraining(profileName, backup) {
     }
   }
   for (const [label, pending] of Object.entries(backup.pendingExamples)) append(label, `pending-${pending.kind}`, pending);
+  for (const [label, threshold] of Object.entries(backup.trainingThresholds ?? {})) append(label, 'threshold', threshold);
+  // An empty global bank must stay empty after a reload, never re-import old
+  // profile rows after the user deliberately removes its last five examples.
+  if (profileName === GLOBAL_TRAINING_PROFILE) append('', 'global-state', {});
   return rows;
 }
 
@@ -101,7 +113,20 @@ function rowsForTraining(profileName, backup) {
  * in payload_json. Profile names and confidence live in explicit columns.
  */
 export async function readTraining(profileName, csvFile = file) {
-  return validateBackup(profileName, restoreTraining(await loadRows(csvFile), profileName));
+  const rows = await loadRows(csvFile);
+  if (profileName !== GLOBAL_TRAINING_PROFILE || rows.slice(1).some(row => row[65] === profileName)) return scopedTraining(profileName, validateBackup(profileName, restoreTraining(rows, profileName)));
+  // First global access seeds from existing personal training. Source rows
+  // remain in the CSV; subsequent global writes establish an explicit bank.
+  const data = new Map();
+  const store = new ProfileStore({ getItem: key => data.get(key) ?? null, setItem: (key, value) => data.set(key, value) });
+  store.login(profileName);
+  for (const name of new Set(rows.slice(1).map(row => row[65]).filter(Boolean))) {
+    const backup = validateBackup(name, restoreTraining(rows, name));
+    const current = store.read(profileName);
+    for (const label of Object.keys(backup.pendingExamples)) if (current.signExamples?.[label]?.length || current.motionExamples?.[label]?.length) delete backup.pendingExamples[label];
+    store.importTraining(profileName, backup);
+  }
+  return scopedTraining(profileName, store.exportTraining(profileName));
 }
 
 let pendingWrite = Promise.resolve();
@@ -115,7 +140,7 @@ export function writeTraining(profileName, backup, csvFile = file) {
     const temporary = new URL(`./.dataset_libras.${randomUUID()}.tmp`, csvFile);
     try { await writeFile(temporary, content, { flag: 'wx' }); await rename(temporary, csvFile); }
     catch (error) { await unlink(temporary).catch(() => {}); throw error; }
-    return accepted;
+    return scopedTraining(normalized, accepted);
   });
   pendingWrite = task;
   return task;

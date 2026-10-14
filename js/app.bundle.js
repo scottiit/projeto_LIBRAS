@@ -7,16 +7,30 @@ const EXAMPLE_LIMIT = 30;
 /** Default lower boundary; each class uses the same policy in every layer. */
 const MIN_EXAMPLE_CONFIDENCE = 0.85;
 const confidenceThreshold = label => label === 'J' ? .75 : MIN_EXAMPLE_CONFIDENCE;
+const MIN_TRAINING_THRESHOLD = .5;
+const MAX_TRAINING_THRESHOLD = .99;
+const GLOBAL_TRAINING_PROFILE = '__global_training__';
+const validTrainingThreshold = value => Number.isFinite(value) && value >= MIN_TRAINING_THRESHOLD && value <= MAX_TRAINING_THRESHOLD && Math.abs(value * 100 - Math.round(value * 100)) < 1e-8;
+const trainingThreshold = (profile, label) => validTrainingThreshold(profile?.trainingThresholds?.[label]) ? profile.trainingThresholds[label] : confidenceThreshold(label);
+const recordAdmissionThreshold = (record, label) => Object.hasOwn(record ?? {}, 'admissionThreshold') ? (validTrainingThreshold(record.admissionThreshold) ? record.admissionThreshold : NaN) : confidenceThreshold(label);
 
 const DEFAULT_BUCKETS = [{ name: '85-90', upper: .9 }, { name: '90-95', upper: .95 }, { name: '95-100', upper: 1 }];
 // Exact rational boundaries split (3/4, 1] into three equal-width bands.
 const J_BUCKETS = [{ name: '75-83⅓', upper: 5 / 6 }, { name: '83⅓-91⅔', upper: 11 / 12 }, { name: '91⅔-100', upper: 1 }];
-const confidenceBands = label => label === 'J' ? J_BUCKETS : DEFAULT_BUCKETS;
+const confidenceBands = (label, threshold = confidenceThreshold(label)) => {
+  if (threshold === confidenceThreshold(label)) return label === 'J' ? J_BUCKETS : DEFAULT_BUCKETS;
+  return Array.from({ length: 3 }, (_, index) => {
+    const lower = threshold + (1 - threshold) * index / 3;
+    const upper = index === 2 ? 1 : threshold + (1 - threshold) * (index + 1) / 3;
+    const display = value => Number((value * 100).toFixed(2)).toLocaleString('pt-BR');
+    return { name: `${display(lower)}-${display(upper)}`, upper };
+  });
+};
 const MIN_BUCKET_EXAMPLES = 2;
 
 /** Reject missing, coerced, non-finite and out-of-range similarity scores. */
-function validExampleConfidence(value, label) {
-  return Number.isFinite(value) && value > confidenceThreshold(label) && value <= 1;
+function validExampleConfidence(value, label, threshold = confidenceThreshold(label)) {
+  return Number.isFinite(threshold) && Number.isFinite(value) && value > threshold && value <= 1;
 }
 
 /**
@@ -24,9 +38,9 @@ function validExampleConfidence(value, label) {
  * Bands are lower-exclusive and upper-inclusive; J uses three equal thirds
  * of (.75, 1]. Other classes retain (.85, .90], (.90, .95], (.95, 1].
  */
-function confidenceBucket(value, label) {
-  if (!validExampleConfidence(value, label)) return null;
-  return confidenceBands(label).find(band => value <= band.upper).name;
+function confidenceBucket(value, label, threshold = confidenceThreshold(label)) {
+  if (!validExampleConfidence(value, label, threshold)) return null;
+  return confidenceBands(label, threshold).find(band => value <= band.upper).name;
 }
 
 /**
@@ -38,14 +52,14 @@ function confidenceBucket(value, label) {
  * @returns {{ total: number, unscored: number, buckets: Object<string,
  *   { count: number, protected: number, missing: number }> }}
  */
-function summarizeExamples(records, label) {
+function summarizeExamples(records, label, threshold = confidenceThreshold(label)) {
   if (!Array.isArray(records)) throw new TypeError('Examples must be an array.');
-  const buckets = Object.fromEntries(confidenceBands(label).map(({ name }) => [name, {
+  const buckets = Object.fromEntries(confidenceBands(label, threshold).map(({ name }) => [name, {
     count: 0, protected: 0, missing: MIN_BUCKET_EXAMPLES,
   }]));
   let unscored = 0;
   for (const record of records) {
-    const bucket = confidenceBucket(record?.confidenceProbability, label);
+    const bucket = confidenceBucket(record?.confidenceProbability, label, threshold);
     if (bucket) buckets[bucket].count++;
     else unscored++;
   }
@@ -76,21 +90,21 @@ function summarizeExamples(records, label) {
  * @param {string} [label] Class whose acceptance threshold and bands apply.
  * @throws {RangeError} If any incoming confidence fails its class threshold.
  */
-function retainExamples(previous, incoming, label) {
+function retainExamples(previous, incoming, label, threshold = confidenceThreshold(label)) {
   if (!Array.isArray(previous)) throw new TypeError('Previous examples must be an array.');
   const batch = Array.isArray(incoming) ? incoming : [incoming];
   for (const example of batch) {
-    if (!validExampleConfidence(example?.confidenceProbability, label)) {
-      throw new RangeError(`Example confidenceProbability must be greater than ${confidenceThreshold(label)} and at most 1.`);
+    if (!validExampleConfidence(example?.confidenceProbability, label, recordAdmissionThreshold(example, label))) {
+      throw new RangeError('Example confidenceProbability must exceed its recorded admission threshold and be at most 1.');
     }
   }
 
   const retained = [...previous];
   const trimOverflow = () => {
     while (retained.length > EXAMPLE_LIMIT) {
-      const { buckets } = summarizeExamples(retained, label);
+      const { buckets } = summarizeExamples(retained, label, threshold);
       const removableIndex = retained.findIndex(example => {
-        const bucket = confidenceBucket(example?.confidenceProbability, label);
+        const bucket = confidenceBucket(example?.confidenceProbability, label, threshold);
         return bucket === null || buckets[bucket].count > MIN_BUCKET_EXAMPLES;
       });
       // Only six representatives can be protected, so overflow above 30 must
@@ -1015,13 +1029,13 @@ const validStaticLabel = label => /^[A-Z0-9]$/.test(label) && !DYNAMIC_CLASSES.h
 const validTrainingLabel = label => validStaticLabel(label) || MOTION_LABELS.includes(label);
 const validStoredVector = vector => Array.isArray(vector) && vector.length === 63 && vector.every(value => Number.isFinite(value) && Math.abs(value) <= 20);
 const legacyStaticExample = example => validStoredVector(example) && !Object.hasOwn(example, 'confidenceProbability');
-const validExampleMetadata = (example, label) => isRecord(example) && validExampleConfidence(example.confidenceProbability, label) && Number.isFinite(example.capturedAt) && example.capturedAt >= 0 && ['reference', 'repeatability'].includes(example.comparisonSource);
+const validExampleMetadata = (example, label) => isRecord(example) && validExampleConfidence(example.confidenceProbability, label, recordAdmissionThreshold(example, label)) && Number.isFinite(example.capturedAt) && example.capturedAt >= 0 && ['reference', 'repeatability'].includes(example.comparisonSource);
 const approvedStaticExample = (example, label) => validExampleMetadata(example, label) && validStoredVector(example.features);
 const approvedMotionExample = (example, label) => validExampleMetadata(example, label) && validMotionClip(example);
 const legacyMotionExample = example => validMotionClip(example) && !Object.hasOwn(example, 'confidenceProbability');
 const storedStaticExample = (example, label) => legacyStaticExample(example) || approvedStaticExample(example, label);
 const storedMotionExample = (example, label) => legacyMotionExample(example) || approvedMotionExample(example, label);
-const copyExampleMetadata = example => ({ confidenceProbability: example.confidenceProbability, capturedAt: example.capturedAt, comparisonSource: example.comparisonSource });
+const copyExampleMetadata = example => ({ confidenceProbability: example.confidenceProbability, capturedAt: example.capturedAt, comparisonSource: example.comparisonSource, ...(Object.hasOwn(example, 'admissionThreshold') ? { admissionThreshold: example.admissionThreshold } : {}) });
 const copyStaticExample = example => Array.isArray(example) ? [...example] : { features: [...example.features], ...copyExampleMetadata(example) };
 const copyMotionExample = example => ({ version: example.version, durationMs: example.durationMs, frames: example.frames.map(frame => [...frame]), ...(example.occlusions ? { occlusions: example.occlusions.map(gap => ({ ...gap })) } : {}), ...(Object.hasOwn(example, 'confidenceProbability') ? copyExampleMetadata(example) : {}) });
 
@@ -1035,7 +1049,7 @@ const copyPendingExample = pending => pending.kind === 'static'
   : { kind: 'motion', clip: copyMotionExample(pending.clip), createdAt: pending.createdAt };
 
 function validateTrainingBank(bank, labelValidator, exampleValidator) {
-  if (!isRecord(bank) || Object.entries(bank).some(([label, examples]) => !labelValidator(label) || !Array.isArray(examples) || examples.length > EXAMPLE_LIMIT || !examples.every(example => exampleValidator(example, label)))) throw new Error('Coleção de exemplos inválida; novos registros precisam superar o limite da classe (75% para J; 85% para as demais) e ter metadados válidos.');
+  if (!isRecord(bank) || Object.entries(bank).some(([label, examples]) => !labelValidator(label) || !Array.isArray(examples) || examples.length > EXAMPLE_LIMIT || !examples.every(example => exampleValidator(example, label)))) throw new Error('Coleção de exemplos inválida; os registros precisam superar seu limite de admissão registrado e ter metadados válidos.');
 }
 
 /** Restore optional explicit FIFO order without trusting client timestamps. */
@@ -1103,12 +1117,31 @@ class ProfileStore {
     this.write(profile);
     return profile;
   }
+  setTrainingThreshold(name, label, threshold) {
+    if (!validTrainingLabel(label) || !validTrainingThreshold(threshold)) throw new Error('Use um limite inteiro entre 50% e 99% para uma classe válida.');
+    const profile = this.requireProfile(name);
+    profile.trainingThresholds = { ...(profile.trainingThresholds ?? {}), [label]: threshold };
+    this.write(profile);
+    return profile;
+  }
+  deleteTrainingBatch(name, label, direction, maximum = 5) {
+    if (!validTrainingLabel(label) || !['oldest', 'newest'].includes(direction) || !Number.isInteger(maximum) || maximum < 1 || maximum > 5) throw new Error('Exclusão de exemplos inválida.');
+    const profile = this.requireProfile(name);
+    const bank = validStaticLabel(label) ? 'signExamples' : 'motionExamples';
+    const examples = profile[bank]?.[label] ?? [];
+    const removedCount = Math.min(maximum, examples.length);
+    if (removedCount) {
+      profile[bank][label] = direction === 'oldest' ? examples.slice(removedCount) : examples.slice(0, examples.length - removedCount);
+      this.write(profile);
+    }
+    return { profile, removedCount };
+  }
   saveExamples(name, label, records) {
-    if (!validStaticLabel(label) || !Array.isArray(records) || !records.length || records.length > EXAMPLE_LIMIT || !records.every(example => approvedStaticExample(example, label))) throw new Error('Exemplos inválidos: a semelhança deve ser maior que 85%, com origem e instante da avaliação.');
+    if (!validStaticLabel(label) || !Array.isArray(records) || !records.length || records.length > EXAMPLE_LIMIT || !records.every(example => approvedStaticExample(example, label))) throw new Error('Exemplos inválidos: supere o limite de admissão registrado, com origem e instante da avaliação.');
     const profile = this.requireProfile(name);
     if (!isRecord(profile.signExamples)) profile.signExamples = {};
     const previous = Array.isArray(profile.signExamples[label]) ? profile.signExamples[label].filter(example => storedStaticExample(example, label)) : [];
-    profile.signExamples[label] = retainExamples(previous, records.map(copyStaticExample), label);
+    profile.signExamples[label] = retainExamples(previous, records.map(copyStaticExample), label, trainingThreshold(profile, label));
     if (isRecord(profile.pendingExamples)) delete profile.pendingExamples[label];
     this.write(profile);
     return profile;
@@ -1124,7 +1157,7 @@ class ProfileStore {
   }
   saveMotion(name, label, clip) { return this.saveMotions(name, label, [clip]); }
   saveMotions(name, label, clips) {
-    if (!MOTION_LABELS.includes(label) || !Array.isArray(clips) || !clips.length || clips.length > EXAMPLE_LIMIT || !clips.every(clip => approvedMotionExample(clip, label))) throw new Error('Movimentos inválidos: supere o limite da classe (75% para J; 85% para as demais), com origem e instante da avaliação.');
+    if (!MOTION_LABELS.includes(label) || !Array.isArray(clips) || !clips.length || clips.length > EXAMPLE_LIMIT || !clips.every(clip => approvedMotionExample(clip, label))) throw new Error('Movimentos inválidos: supere o limite de admissão registrado, com origem e instante da avaliação.');
     return this.importMotion(name, { version: MOTION_VERSION, examples: { [label]: clips } });
   }
   importMotion(name, payload) {
@@ -1134,7 +1167,7 @@ class ProfileStore {
     if (!isRecord(profile.motionExamples)) profile.motionExamples = {};
     for (const [label, clips] of Object.entries(payload.examples)) {
       const previous = Array.isArray(profile.motionExamples[label]) ? profile.motionExamples[label].filter(example => storedMotionExample(example, label)) : [];
-      profile.motionExamples[label] = retainExamples(previous, clips.map(copyMotionExample), label);
+      profile.motionExamples[label] = retainExamples(previous, clips.map(copyMotionExample), label, trainingThreshold(profile, label));
       if (clips.length && isRecord(profile.pendingExamples)) delete profile.pendingExamples[label];
     }
     this.write(profile);
@@ -1164,11 +1197,11 @@ class ProfileStore {
   }
   exportTraining(name) {
     const profile = this.requireProfile(name);
-    const backup = { version: 1, kind: 'libras-training', signExamples: {}, motionExamples: {}, legacyReferences: { signExamples: {}, motionExamples: {} }, exampleOrder: { signExamples: {}, motionExamples: {} }, pendingExamples: {} };
+    const backup = { version: 1, kind: 'libras-training', signExamples: {}, motionExamples: {}, legacyReferences: { signExamples: {}, motionExamples: {} }, exampleOrder: { signExamples: {}, motionExamples: {} }, pendingExamples: {}, trainingThresholds: { ...(profile.trainingThresholds ?? {}) } };
     for (const [bank, isValid, clone, isApproved] of [['signExamples', storedStaticExample, copyStaticExample, approvedStaticExample], ['motionExamples', storedMotionExample, copyMotionExample, approvedMotionExample]]) {
       for (const [label, examples] of Object.entries(profile[bank] ?? {})) {
         if (!(bank === 'signExamples' ? validStaticLabel(label) : MOTION_LABELS.includes(label)) || !Array.isArray(examples)) continue;
-        const valid = retainExamples(examples.filter(example => isValid(example, label)), [], label);
+        const valid = retainExamples(examples.filter(example => isValid(example, label)), [], label, trainingThreshold(profile, label));
         backup[bank][label] = valid.filter(example => isApproved(example, label)).map(clone);
         backup.legacyReferences[bank][label] = valid.filter(example => !isApproved(example, label)).map(clone);
         backup.exampleOrder[bank][label] = valid.map(example => isApproved(example, label) ? 'approved' : 'legacy');
@@ -1191,6 +1224,9 @@ class ProfileStore {
     const order = payload.exampleOrder ?? {};
     if (!isRecord(order) || Object.keys(order).some(bank => !['signExamples', 'motionExamples'].includes(bank))) throw new Error('Ordem dos exemplos no backup inválida.');
     const profile = this.requireProfile(name);
+    const thresholds = payload.trainingThresholds ?? {};
+    if (!isRecord(thresholds) || Object.entries(thresholds).some(([label, value]) => !validTrainingLabel(label) || !validTrainingThreshold(value))) throw new Error('Limites de treinamento inválidos no backup.');
+    profile.trainingThresholds = { ...(profile.trainingThresholds ?? {}), ...thresholds };
     for (const [bank, incoming, isValid, clone] of [['signExamples', signs, storedStaticExample, copyStaticExample], ['motionExamples', motions, storedMotionExample, copyMotionExample]]) {
       const previousLegacy = legacy[bank] ?? {};
       if (order[bank] !== undefined && (!isRecord(order[bank]) || Object.keys(order[bank]).some(label => !Object.hasOwn(incoming, label) && !Object.hasOwn(previousLegacy, label)))) throw new Error('Ordem dos exemplos no backup inválida.');
@@ -1202,7 +1238,7 @@ class ProfileStore {
         let retained = Array.isArray(profile[bank][label]) ? profile[bank][label].filter(example => isValid(example, label)) : [];
         for (const example of ordered) {
           const copy = clone(example);
-          retained = validExampleConfidence(copy?.confidenceProbability, label) ? retainExamples(retained, [copy], label) : retainExamples([...retained, copy], [], label);
+          retained = validExampleConfidence(copy?.confidenceProbability, label, recordAdmissionThreshold(copy, label)) ? retainExamples(retained, [copy], label, trainingThreshold(profile, label)) : retainExamples([...retained, copy], [], label, trainingThreshold(profile, label));
         }
         profile[bank][label] = retained;
         if (approved.length && isRecord(profile.pendingExamples)) delete profile.pendingExamples[label];
@@ -1255,21 +1291,22 @@ class TrainingManager {
     comparator.personal = [...classifier.personal, { label, features: staticRepresentative(candidate.samples), source: 'repeatability' }];
     return comparator;
   }
-  evaluate(candidate, label, classifier) {
+  evaluate(candidate, label, classifier, threshold = confidenceThreshold(label)) {
     const predictions = candidate.kind === 'motion' ? [classifier.predict(candidate.clip)] : candidate.samples.map(features => classifier.predictFeatures(features, /^\d$/.test(label) ? 'numbers' : 'alphabet'));
     return predictions.map(prediction => {
       // UNKNOWN is an explicit negative class: it can seed rejection examples,
       // but its accepted comparison must never become positive game evidence.
-      const matchedLabel = label === 'UNKNOWN' ? prediction.alternatives?.[0]?.label : prediction.targetClass;
+      const matchedLabel = candidate.kind === 'motion' ? prediction.alternatives?.[0]?.label : prediction.targetClass;
       const confidence = candidate.kind === 'motion' ? prediction.similarityScore : prediction.confidenceProbability;
       // Rejected game evidence deliberately has confidenceProbability=0. It
       // must not overwrite the actual comparison score in training feedback.
       // Admission still requires an accepted class (or explicit UNKNOWN).
-      return { confidence, matchedLabel: matchedLabel ?? prediction.alternatives?.[0]?.label ?? null, reason: prediction.reason, accepted: matchedLabel === label && validExampleConfidence(confidence, label) };
+      const validComparison = !['invalid', 'invalid-comparison', 'no-examples', 'depth-required'].includes(prediction.reason);
+      return { confidence, matchedLabel: matchedLabel ?? null, reason: prediction.reason, accepted: validComparison && matchedLabel === label && validExampleConfidence(confidence, label, threshold) };
     });
   }
-  records(candidate, assessments, capturedAt, comparisonSource) {
-    const metadata = index => ({ confidenceProbability: assessments[index].confidence, capturedAt, comparisonSource });
+  records(candidate, assessments, capturedAt, comparisonSource, admissionThreshold) {
+    const metadata = index => ({ confidenceProbability: assessments[index].confidence, capturedAt, comparisonSource, admissionThreshold });
     if (candidate.kind === 'motion') return [{ ...candidate.clip, ...metadata(0) }];
     // The capture's weakest admitted observation determines its quality band;
     // choosing a representative must not inflate the stored confidence.
@@ -1279,6 +1316,7 @@ class TrainingManager {
     const profile = this.store.read(name);
     if (!profile) throw new Error('Perfil não encontrado.');
     const now = this.clock();
+    const threshold = trainingThreshold(profile, label);
     let assessments, records, source = 'reference';
     if (!classifier.hasClass(label)) {
       const pending = profile.pendingExamples?.[label];
@@ -1287,15 +1325,15 @@ class TrainingManager {
       }
       // Evaluate both directions to avoid admitting the first execution solely
       // because the second happened to match one of its easiest observations.
-      assessments = this.evaluate(candidate, label, this.comparatorWithReference(classifier, label, pending));
-      const previousAssessments = this.evaluate(pending, label, this.comparatorWithReference(classifier, label, candidate));
+      assessments = this.evaluate(candidate, label, this.comparatorWithReference(classifier, label, pending), threshold);
+      const previousAssessments = this.evaluate(pending, label, this.comparatorWithReference(classifier, label, candidate), threshold);
       if ([...assessments, ...previousAssessments].some(item => !item.accepted)) return this.rejected(profile, [...assessments, ...previousAssessments], true);
       source = 'repeatability';
-      records = [...this.records(pending, previousAssessments, pending.createdAt, source), ...this.records(candidate, assessments, now, source)];
+      records = [...this.records(pending, previousAssessments, pending.createdAt, source, threshold), ...this.records(candidate, assessments, now, source, threshold)];
     } else {
-      assessments = this.evaluate(candidate, label, classifier);
+      assessments = this.evaluate(candidate, label, classifier, threshold);
       if (assessments.some(item => !item.accepted)) return this.rejected(profile, assessments, false);
-      records = this.records(candidate, assessments, now, source);
+      records = this.records(candidate, assessments, now, source, threshold);
     }
     const saved = candidate.kind === 'motion' ? this.store.saveMotions(name, label, records) : this.store.saveExamples(name, label, records);
     return { state: 'saved', profile: saved, savedCount: records.length, confidence: Math.min(...records.map(record => record.confidenceProbability)), comparisonSource: source };
@@ -1307,7 +1345,7 @@ class TrainingManager {
 }
 
 
-const EMPTY = () => ({ version: 1, kind: 'libras-training', signExamples: {}, motionExamples: {}, legacyReferences: { signExamples: {}, motionExamples: {} }, exampleOrder: { signExamples: {}, motionExamples: {} }, pendingExamples: {} });
+const EMPTY = () => ({ version: 1, kind: 'libras-training', signExamples: {}, motionExamples: {}, legacyReferences: { signExamples: {}, motionExamples: {} }, exampleOrder: { signExamples: {}, motionExamples: {} }, pendingExamples: {}, trainingThresholds: {} });
 const bankNames = ['signExamples', 'motionExamples'];
 
 function orderedExamples(backup, bank, label) {
@@ -1323,9 +1361,10 @@ function trainingBanks(backup) {
     banks[bank] = Object.fromEntries([...labels].map(label => [label, orderedExamples(backup, bank, label)]));
   }
   banks.pendingExamples = backup.pendingExamples ?? {};
+  banks.trainingThresholds = backup.trainingThresholds ?? {};
   return banks;
 }
-const hasTraining = backup => bankNames.some(bank => Object.values(backup[bank] ?? {}).some(examples => examples.length) || Object.values(backup.legacyReferences?.[bank] ?? {}).some(examples => examples.length)) || Object.keys(backup.pendingExamples ?? {}).length > 0;
+const hasTraining = backup => bankNames.some(bank => Object.values(backup[bank] ?? {}).some(examples => examples.length) || Object.values(backup.legacyReferences?.[bank] ?? {}).some(examples => examples.length)) || Object.keys(backup.pendingExamples ?? {}).length > 0 || Object.keys(backup.trainingThresholds ?? {}).length > 0;
 
 /** file:// and HTTP have distinct browser storage. The file-page exporter
  * contains training fields only; reconstruct metadata solely for validation. */
@@ -1354,9 +1393,9 @@ class SplitProfileStorage {
   }
   setItem(key, value) {
     const profile = JSON.parse(value);
-    const { signExamples, motionExamples, pendingExamples, ...metadata } = profile;
+    const { signExamples, motionExamples, pendingExamples, trainingThresholds, ...metadata } = profile;
     this.browserStorage.setItem(key, JSON.stringify(metadata));
-    this.training.set(key, { signExamples, motionExamples, pendingExamples });
+    this.training.set(key, { signExamples, motionExamples, pendingExamples, trainingThresholds });
   }
   seed(name, backup) {
     const key = new ProfileStore(this).key(name);
@@ -1396,31 +1435,44 @@ function missingFromCsv(previous, csv) {
   for (const [label, pending] of Object.entries(previous.pendingExamples ?? {})) {
     if (!csv.pendingExamples?.[label] && !csv.signExamples?.[label]?.length && !csv.motionExamples?.[label]?.length) missing.pendingExamples[label] = pending;
   }
+  for (const [label, threshold] of Object.entries(previous.trainingThresholds ?? {})) if (!Object.hasOwn(csv.trainingThresholds ?? {}, label)) missing.trainingThresholds[label] = threshold;
   return missing;
 }
 
 class CsvTrainingRepository {
-  constructor(store, splitStorage, browserStorage) {
+  constructor(store, splitStorage, browserStorage, { global = false } = {}) {
     Object.assign(this, { store, splitStorage, browserStorage });
+    this.global = global;
+    this.loadedProfiles = new Set();
     this.committed = new Map();
   }
+  datasetName(name) { return this.global ? GLOBAL_TRAINING_PROFILE : name; }
+  validateScope(backup) {
+    if (this.global && backup?.trainingScope !== GLOBAL_TRAINING_PROFILE) throw new Error('O servidor está desatualizado para o Perfil global. Pare o servidor antigo (Ctrl+C), execute npm start novamente e recarregue a página. Os exemplos existentes no CSV foram preservados.');
+    return backup;
+  }
+  seed(name, backup) {
+    this.loadedProfiles.add(name);
+    for (const target of this.global ? this.loadedProfiles : [name]) this.splitStorage.seed(target, backup);
+  }
   async load(name) {
-    const key = this.store.key(name);
-    const original = this.browserStorage.getItem(key);
+    const key = this.store.key(this.datasetName(name));
+    const browserKey = this.store.key(name);
+    const original = this.browserStorage.getItem(browserKey);
     const oldProfile = original ? JSON.parse(original) : null;
     const hadBrowserTraining = Boolean(oldProfile && ('signExamples' in oldProfile || 'motionExamples' in oldProfile || 'pendingExamples' in oldProfile));
     const legacy = hadBrowserTraining
       ? new ProfileStore(this.browserStorage).exportTraining(name) : EMPTY();
-    const csv = await request(`/api/training?profile=${encodeURIComponent(name)}`);
-    this.splitStorage.seed(name, csv);
+    const csv = this.validateScope(await request(`/api/training?profile=${encodeURIComponent(this.datasetName(name))}`));
+    this.seed(name, csv);
     this.committed.set(key, csv);
     if (hasTraining(legacy)) {
       const missing = missingFromCsv(legacy, csv);
       if (hasTraining(missing)) {
         try { this.store.importTraining(name, missing); await this.persist(name); }
         catch (error) {
-          this.splitStorage.seed(name, csv);
-          this.browserStorage.setItem(key, original);
+          this.seed(name, csv);
+          this.browserStorage.setItem(browserKey, original);
           throw new Error(`Não foi possível migrar os exemplos antigos para o CSV: ${error.message}`);
         }
       } else this.store.write(this.store.read(name));
@@ -1428,14 +1480,14 @@ class CsvTrainingRepository {
     return this.store.read(name);
   }
   async persist(name) {
-    const key = this.store.key(name);
+    const key = this.store.key(this.datasetName(name));
     const before = this.committed.get(key) ?? EMPTY();
     try {
-      const accepted = await request('/api/training', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: name, training: this.store.exportTraining(name) }) });
-      this.splitStorage.seed(name, accepted);
+      const accepted = this.validateScope(await request('/api/training', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: this.datasetName(name), training: this.store.exportTraining(name) }) }));
+      this.seed(name, accepted);
       this.committed.set(key, accepted);
       return this.store.read(name);
-    } catch (error) { this.splitStorage.seed(name, before); throw error; }
+    } catch (error) { this.seed(name, before); throw error; }
   }
 }
 
@@ -1579,6 +1631,90 @@ class VisionController {
 }
 
 
+/** DOM adapter: staged changes are inert until this native dialog confirms.
+ * Native dialog handles focus trapping and Escape. A cancelled/stale operation
+ * never calls the persistence adapter. Actual persistence errors keep the modal
+ * open so the user can retry or cancel; the repository restores committed data.
+ */
+class TrainingDangerZone {
+  constructor(root, getContext, apply, onError = () => {}) {
+    Object.assign(this, { root, getContext, apply, onError });
+    this.pending = null; this.working = false;
+    this.element = id => root.getElementById(id);
+    this.dialog = this.element('training-confirmation');
+    this.element('training-threshold').addEventListener('input', () => this.renderProposal());
+    this.element('apply-training-threshold').addEventListener('click', () => this.open('threshold'));
+    this.element('delete-oldest-examples').addEventListener('click', () => this.open('oldest'));
+    this.element('delete-newest-examples').addEventListener('click', () => this.open('newest'));
+    this.element('cancel-training-action').addEventListener('click', () => this.cancel());
+    this.element('confirm-training-action').addEventListener('click', () => this.confirm());
+    this.dialog.addEventListener('cancel', event => { event.preventDefault(); this.cancel(); });
+    this.dialog.addEventListener('close', () => { this.pending = null; this.trigger?.focus(); });
+  }
+  signature(context) { return JSON.stringify([context.name, context.label, context.threshold, context.records]); }
+  render() {
+    const context = this.getContext();
+    if (!context) return;
+    this.context = context;
+    const count = Math.min(5, context.records.length);
+    this.element('danger-scope').textContent = `Perfil global · sinal ${context.label === 'UNKNOWN' ? 'de rejeição' : context.label}. Alterações no CSV serão usadas por todos os jogadores.`;
+    this.element('threshold-current').textContent = `Mínimo aplicado: mais de ${Math.round(context.threshold * 100)}%.`;
+    this.element('training-threshold').value = String(Math.round(context.threshold * 100));
+    this.element('training-threshold').disabled = context.busy;
+    for (const [id, description] of [['delete-oldest-examples', 'mais antigos'], ['delete-newest-examples', 'mais recentes']]) {
+      this.element(id).textContent = `Apagar ${count || 5} ${description}`;
+      this.element(id).disabled = context.busy || count === 0;
+    }
+    this.renderProposal();
+  }
+  renderProposal() {
+    const value = Number(this.element('training-threshold').value);
+    this.element('training-threshold-value').textContent = `${value}%`;
+    this.element('apply-training-threshold').disabled = !this.context || this.context.busy || !validTrainingThreshold(value / 100) || value === Math.round(this.context.threshold * 100);
+  }
+  open(kind) {
+    const context = this.getContext();
+    if (!context || context.busy || this.dialog.open || this.working) return;
+    const count = Math.min(5, context.records.length);
+    const value = Number(this.element('training-threshold').value) / 100;
+    if (kind === 'threshold' ? !validTrainingThreshold(value) || value === context.threshold : count === 0) return;
+    this.pending = { kind, value, count, label: context.label, name: context.name, signature: this.signature(context) };
+    this.trigger = this.root.activeElement;
+    this.element('training-confirmation-error').hidden = true;
+    this.element('training-confirmation-title').textContent = kind === 'threshold' ? 'Alterar tolerância?' : 'Excluir exemplos permanentemente?';
+    this.element('training-confirmation-description').textContent = kind === 'threshold'
+      ? `Tem certeza que deseja alterar a tolerância de ${context.label} para ${Math.round(value * 100)}% no Perfil global? Isso afetará a captura de novos sinais por todos os treinadores. Os exemplos existentes serão preservados e o limite do jogo continuará igual.`
+      : `Você está prestes a excluir ${count} ${count === 1 ? 'exemplo' : 'exemplos'} ${kind === 'oldest' ? 'mais antigos' : 'mais recentes'} de ${context.label} permanentemente do Perfil global em dataset_libras.csv. Esta ação também pode remover âncoras protegidas e afetará todos os jogadores. Deseja continuar?`;
+    this.element('confirm-training-action').textContent = kind === 'threshold' ? 'Aplicar tolerância' : `Excluir ${count} ${count === 1 ? 'exemplo' : 'exemplos'}`;
+    this.element('confirm-training-action').className = kind === 'threshold' ? 'primary' : 'danger-button danger-solid';
+    this.dialog.showModal();
+    this.element('cancel-training-action').focus();
+  }
+  cancel() { if (this.working) return; this.pending = null; if (this.dialog.open) this.dialog.close(); }
+  async confirm() {
+    if (!this.pending || this.working) return;
+    const context = this.getContext(), operation = this.pending;
+    if (!context || context.busy || this.signature(context) !== operation.signature) {
+      this.cancel(); this.onError(new Error('Os dados mudaram. Revise a letra e abra a confirmação novamente.')); return;
+    }
+    this.working = true;
+    for (const id of ['confirm-training-action', 'cancel-training-action']) this.element(id).disabled = true;
+    try {
+      await this.apply(operation);
+      this.pending = null; this.dialog.close();
+    } catch (error) {
+      this.element('training-confirmation-error').textContent = `Alteração não salva: ${error.message}`;
+      this.element('training-confirmation-error').hidden = false;
+      this.onError(error);
+    } finally {
+      this.working = false;
+      for (const id of ['confirm-training-action', 'cancel-training-action']) this.element(id).disabled = false;
+      this.render();
+    }
+  }
+}
+
+
 const $ = id => document.getElementById(id);
 const wideLayout = window.matchMedia('(min-width: 900px)');
 $('calibration-panel').open = wideLayout.matches;
@@ -1594,9 +1730,34 @@ let debugPending = false, dropUntil = 0, session = 0, lastMockAt = 0;
 let lastMotionAlternatives = null;
 let countdownEndsAt = null;
 let pendingTrainingLabel = null;
+const dangerZone = new TrainingDangerZone(document, () => {
+  if (!profile || screen !== 'training') return null;
+  const label = $('calibration-class').value;
+  const current = store.read(profile.name);
+  const bank = DYNAMIC_CLASSES.has(label) || label === 'UNKNOWN' ? 'motionExamples' : 'signExamples';
+  return { name: profile.name, label, records: current?.[bank]?.[label] ?? [], threshold: trainingThreshold(current, label), busy: Boolean(vision.calibration) || savingTraining };
+}, async operation => {
+  const token = session;
+  savingTraining = true; renderReference();
+  try {
+    let removedCount = 0;
+    if (operation.kind === 'threshold') store.setTrainingThreshold(operation.name, operation.label, operation.value);
+    else ({ removedCount } = store.deleteTrainingBatch(operation.name, operation.label, operation.kind, operation.count));
+    const saved = await trainingRepository.persist(operation.name);
+    if (token === session && profile?.name === operation.name) {
+      profile = saved;
+      vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples);
+      $('danger-status').textContent = operation.kind === 'threshold' ? `Tolerância de ${operation.label} aplicada: mais de ${Math.round(operation.value * 100)}%. Salva no Perfil global.` : `${removedCount} ${removedCount === 1 ? 'exemplo excluído' : 'exemplos excluídos'} de ${operation.label} no CSV global.`;
+    }
+  } catch (error) {
+    if (profile?.name === operation.name) profile = store.read(operation.name);
+    throw error;
+  } finally { savingTraining = false; if (token === session && profile?.name === operation.name) renderReference(); }
+}, report);
 function report(error) { $('error').textContent = error.message || String(error); $('error').hidden = false; }
 function clearError() { $('error').hidden = true; }
 function showScreen(name, focus) {
+  if (name !== 'training') dangerZone.cancel();
   if (screen === 'training' && name !== 'training') $('reference-media').querySelector('video')?.pause();
   screen = name;
   document.body.dataset.screen = name;
@@ -1659,10 +1820,10 @@ const vision = new VisionController($('camera'), $('overlay'), (prediction, capt
       if (token !== session || profile?.name !== name || screen !== 'training') return;
       profile = store.read(name);
       vision.setPersonalExamples(profile.signExamples); vision.setMotionExamples(profile.motionExamples);
-      if (admission.state === 'pending') $('calibration-status').textContent = `Primeira execução provisória salva neste perfil. Grave novamente: as duas precisam superar ${confidenceThreshold(status.label) * 100}% de semelhança entre si. Isso mede repetibilidade, não correção do sinal.`;
-      else if (admission.state === 'rejected') $('calibration-status').textContent = `Nenhum exemplo entrou na base. ${Number.isFinite(admission.confidence) ? `Escore de comparação: ${formatSimilarity(admission.confidence)}; precisamos de mais de ${confidenceThreshold(status.label) * 100}% e uma correspondência sem ambiguidade para ${status.label}.` : 'Comparação indisponível: referência ausente ou sequência inválida. Recomece a referência.'}${admission.matchedLabel && admission.matchedLabel !== status.label ? ` A classe mais próxima foi ${admission.matchedLabel}.` : ''}${admission.provisional ? ' A primeira execução provisória foi mantida; repita ou recomece a referência.' : ''}`;
+      if (admission.state === 'pending') $('calibration-status').textContent = `Primeira execução provisória salva no Perfil global. Grave novamente: as duas precisam superar ${Math.round(trainingThreshold(profile, status.label) * 100)}% de semelhança entre si. Isso mede repetibilidade, não correção do sinal.`;
+      else if (admission.state === 'rejected') $('calibration-status').textContent = `Nenhum exemplo entrou na base. ${Number.isFinite(admission.confidence) ? `Escore de comparação: ${formatSimilarity(admission.confidence)}; precisamos de mais de ${Math.round(trainingThreshold(profile, status.label) * 100)}% e uma correspondência sem ambiguidade para ${status.label}.` : 'Comparação indisponível: referência ausente ou sequência inválida. Recomece a referência.'}${admission.matchedLabel && admission.matchedLabel !== status.label ? ` A classe mais próxima foi ${admission.matchedLabel}.` : ''}${admission.provisional ? ' A primeira execução provisória foi mantida; repita ou recomece a referência.' : ''}`;
       else {
-        $('calibration-status').textContent = `${admission.savedCount === 1 ? '1 exemplo salvo' : `${admission.savedCount} exemplos salvos`} em dataset_libras.csv para ${profile.name}. Menor semelhança: ${(admission.confidence * 100).toFixed(1)}%.${admission.comparisonSource === 'repeatability' ? ' A primeira e a segunda execução foram aprovadas: um exemplo de cada captura.' : ''}`;
+        $('calibration-status').textContent = `${admission.savedCount === 1 ? '1 exemplo salvo' : `${admission.savedCount} exemplos salvos`} em dataset_libras.csv no Perfil global. Menor semelhança: ${(admission.confidence * 100).toFixed(1)}%.${admission.comparisonSource === 'repeatability' ? ' A primeira e a segunda execução foram aprovadas: um exemplo de cada captura.' : ''}`;
         if (status.depth?.warnings?.length) $('calibration-status').textContent += ' A variação dos dedos ou da palma foi preservada no exemplo.';
         if (status.clip?.occlusions?.length) $('calibration-status').textContent += ' Os intervalos de oclusão ficaram registrados no exemplo.';
       }
@@ -1920,7 +2081,8 @@ function renderReference() {
   $('motion-tools').hidden = !temporal;
   $('motion-guide').hidden = !temporal;
   const records = (temporal ? profile?.motionExamples?.[label] : profile?.signExamples?.[label]) ?? [];
-  const summary = summarizeExamples(records, label);
+  const threshold = trainingThreshold(profile, label);
+  const summary = summarizeExamples(records, label, threshold);
   $('personal-count').textContent = `${summary.total} de ${EXAMPLE_LIMIT} exemplos salvos para ${label === 'UNKNOWN' ? 'rejeição' : label}.`;
   if (label === 'X') {
     const usable = vision.dynamic.classifier.examples.X.length;
@@ -1928,17 +2090,18 @@ function renderReference() {
     $('personal-count').textContent += ` ${usable} disponíveis para reconhecimento.${saved > usable ? ` ${saved - usable} anteriores precisam ser regravados com a leitura de profundidade.` : ''}`;
   }
   $('training-buckets').textContent = Object.entries(summary.buckets).map(([range, bucket]) => `${range}%: ${bucket.protected}/2 âncoras (${bucket.count} exemplos)`).join(' · ');
-  $('training-retention').textContent = `Mínimo para ${label}: mais de ${confidenceThreshold(label) * 100}%. Até 6 dos 30 exemplos (20%) são protegidos: dois por faixa. Ao atingir 30, sai o mais antigo que preserve essa cota.${summary.unscored ? ` ${summary.unscored} exemplos antigos sem escore foram preservados e não contam como âncoras.` : ''} As faixas excluem o limite inferior e incluem o superior. Faixas incompletas aguardam exemplos; os escores não são alterados para preenchê-las.`;
+  $('training-retention').textContent = `Mínimo para novos exemplos de ${label}: mais de ${Math.round(threshold * 100)}%. Até 6 dos 30 exemplos (20%) são protegidos: dois por faixa. Ao atingir 30, sai o mais antigo que preserve essa cota.${summary.unscored ? ` ${summary.unscored} exemplos sem escore ou abaixo do limite atual são preservados, mas não contam como âncoras.` : ''} As faixas excluem o limite inferior e incluem o superior. Faixas incompletas aguardam exemplos; os escores não são alterados para preenchê-las.`;
   const pending = profile?.pendingExamples?.[label];
   $('training-pending').hidden = !pending;
   $('training-pending').textContent = 'Há uma primeira execução provisória salva. Grave a segunda para comparar; ela ainda não participa do reconhecimento.';
   $('reset-training-reference').hidden = !pending;
   $('reset-training-reference').disabled = busy;
-  $('training-storage').textContent = `Exemplos deste perfil: dataset_libras.csv, na pasta do projeto. Perfis e recordes: neste navegador. Use o servidor Node local para gravar e recarregar o treinamento.`;
+  $('training-storage').textContent = 'Exemplos e tolerâncias: Perfil global em dataset_libras.csv, compartilhados entre jogadores. Perfis e recordes: neste navegador. Use o servidor Node local para gravar e recarregar o treinamento.';
   if (label === 'UNKNOWN') $('reference-caption').textContent = 'Grave movimentos parecidos, mas incorretos (ex.: trajetória incompleta ou invertida), para ajudar o sistema a rejeitá-los.';
   $('remove-motion').disabled = busy || !profile?.motionExamples?.[label]?.length;
   $('import-motion').disabled = busy;
-  $('export-motion').disabled = busy || ![profile?.motionExamples, profile?.signExamples, profile?.pendingExamples].some(bank => bank && Object.keys(bank).length);
+  $('export-motion').disabled = busy || ![profile?.motionExamples, profile?.signExamples, profile?.pendingExamples, profile?.trainingThresholds].some(bank => bank && Object.keys(bank).length);
+  dangerZone.render();
 }
 function finishCalibration() {
   vision.cancelCalibration();
@@ -1976,7 +2139,7 @@ $('calibration-class').addEventListener('change', () => {
   if (screen !== 'training') return;
   vision.setTarget($('calibration-class').value === 'UNKNOWN' ? 'K' : $('calibration-class').value);
   $('recognition-hint').textContent = `Teste livre: ${$('calibration-class').value === 'UNKNOWN' ? 'movimento de rejeição' : $('calibration-class').value}.`;
-  $('calibration-status').textContent = ''; renderReference();
+  $('calibration-status').textContent = ''; $('danger-status').textContent = ''; renderReference();
   if (DYNAMIC_CLASSES.has(vision.target)) showMotionState({ state: 'arming' });
   else { $('motion-indicator').hidden = true; $('motion-cue').hidden = true; }
 });
@@ -2168,7 +2331,7 @@ async function update(now) {
 try {
   const splitStorage = new SplitProfileStorage(localStorage);
   store = new ProfileStore(splitStorage); training = new TrainingManager(store);
-  trainingRepository = new CsvTrainingRepository(store, splitStorage, localStorage);
+  trainingRepository = new CsvTrainingRepository(store, splitStorage, localStorage, { global: true });
   listProfiles();
   const activeName = localStorage.getItem(ACTIVE_PROFILE_KEY);
   if (activeName && store.read(activeName)) void login(activeName);
