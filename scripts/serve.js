@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { readTraining, writeTraining } from './training-csv.js';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const origin = 'http://127.0.0.1:5173';
-const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.mp4': 'video/mp4' };
+const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml; charset=utf-8', '.mp4': 'video/mp4' };
 const json = (response, status, data) => response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }).end(JSON.stringify(data));
 async function bodyJson(request) {
   let size = 0, chunks = [];

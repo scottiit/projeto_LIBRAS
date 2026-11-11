@@ -147,3 +147,26 @@ export class CsvTrainingRepository {
     } catch (error) { this.seed(name, before); throw error; }
   }
 }
+
+/** Published snapshots never call the local API or migrate browser training. */
+export class StaticTrainingRepository {
+  constructor(store, splitStorage, url, fetcher = (...args) => globalThis.fetch(...args)) {
+    Object.assign(this, { store, splitStorage, url, fetcher });
+    this.readOnly = true;
+  }
+  async load(name) {
+    if (!this.snapshot) {
+      const response = await this.fetcher(this.url, { cache: 'no-cache' });
+      if (!response.ok) throw new Error('Não foi possível carregar os exemplos publicados. Recarregue a página.');
+      const snapshot = await response.json();
+      if (snapshot.version !== 1 || snapshot.kind !== 'libras-training' || snapshot.trainingScope !== GLOBAL_TRAINING_PROFILE) throw new Error('Base publicada incompatível. Gere novamente a publicação.');
+      this.snapshot = snapshot;
+    }
+    this.splitStorage.seed(name, this.snapshot);
+    return this.store.read(name);
+  }
+  async persist(name) {
+    if (this.snapshot) this.splitStorage.seed(name, this.snapshot);
+    throw new Error('Esta versão usa exemplos publicados. Altere o treinamento no servidor local.');
+  }
+}

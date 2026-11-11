@@ -2,14 +2,28 @@ import { MODES, createSequence, formatTime } from './games.js';
 import { ProfileStore } from './storage.js';
 import { GameEngine } from './engine.js';
 import { VisionController, StaticClassifierMock } from './vision.js';
-import { SIGN_REFERENCES } from './dataset.js';
+import { renderReferenceMedia } from './reference-media.js';
 import { DYNAMIC_CLASSES } from './trajectory.js';
 import { EXAMPLE_LIMIT, summarizeExamples, confidenceThreshold, validExampleConfidence, trainingThreshold } from './example-policy.js';
 import { TrainingManager } from './training.js';
-import { SplitProfileStorage, CsvTrainingRepository, trainingFromBrowserProfiles } from './csv-training.js';
+import { SplitProfileStorage, CsvTrainingRepository, StaticTrainingRepository, trainingFromBrowserProfiles } from './csv-training.js';
 import { TrainingDangerZone } from './training-danger-zone.js';
 
 const $ = id => document.getElementById(id);
+const publicMode = document.querySelector('meta[name="libras-mode"]')?.content === 'static';
+if (publicMode) {
+  document.body.classList.add('public-mode');
+  $('open-training').textContent = 'Referências e prática';
+  $('training-title').textContent = 'Referências e prática';
+  $('training-title').nextElementSibling.textContent = 'Consulte os sinais e teste os exemplos publicados com a câmera.';
+  document.querySelector('.training-note p').textContent = 'Consulte as referências e pratique com os exemplos publicados. Novos treinamentos são preparados pela equipe na versão local.';
+  document.querySelector('.reference-note').textContent = 'Esta versão utiliza uma base publicada. Confira a execução com um instrutor.';
+  document.querySelector('#calibration-panel .privacy-note').textContent = 'Sua câmera é processada neste navegador. Perfis e recordes ficam neste dispositivo.';
+  const mutations = new Set(['save-example', 'reset-training-reference', 'remove-motion', 'import-motion', 'apply-training-threshold', 'delete-oldest-examples', 'delete-newest-examples', 'confirm-training-action']);
+  for (const type of ['click', 'change']) document.addEventListener(type, event => {
+    if (mutations.has(event.target.closest('[id]')?.id)) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+}
 const wideLayout = window.matchMedia('(min-width: 900px)');
 $('calibration-panel').open = wideLayout.matches;
 wideLayout.addEventListener('change', event => { $('calibration-panel').open = event.matches; });
@@ -370,16 +384,8 @@ function renderTarget() {
 }
 function renderReference() {
   const label = $('calibration-class').value;
-  const path = SIGN_REFERENCES[label];
-  $('reference-media').replaceChildren();
-  if (path) {
-    const element = document.createElement(path.endsWith('.mp4') ? 'video' : 'img');
-    element.src = path;
-    if (element.tagName === 'VIDEO') { element.controls = true; element.muted = true; element.playsInline = true; element.preload = 'none'; }
-    else { element.alt = `Referência de ${label} do acervo original`; element.loading = 'lazy'; }
-    $('reference-media').append(element);
-  }
-  $('reference-caption').textContent = path ? `Referência de ${label} do acervo original. Confira a execução com um instrutor de LIBRAS.` : 'Não há imagem de referência para este número no acervo. Peça a um instrutor para demonstrá-lo antes de salvar.';
+  const media = renderReferenceMedia($('reference-media'), label);
+  $('reference-caption').textContent = media.illustration ? `Ilustração de ${label}, recortada da imagem fornecida.${media.video ? ' Abra o vídeo para observar o movimento completo.' : ''} Confira a execução com um instrutor de LIBRAS.` : 'Não há imagem de referência para este número no acervo. Peça a um instrutor para demonstrá-lo antes de salvar.';
   const dynamic = DYNAMIC_CLASSES.has(label);
   const temporal = dynamic || label === 'UNKNOWN';
   const busy = Boolean(vision.calibration) || savingTraining;
@@ -640,7 +646,9 @@ async function update(now) {
 try {
   const splitStorage = new SplitProfileStorage(localStorage);
   store = new ProfileStore(splitStorage); training = new TrainingManager(store);
-  trainingRepository = new CsvTrainingRepository(store, splitStorage, localStorage, { global: true });
+  trainingRepository = publicMode
+    ? new StaticTrainingRepository(store, splitStorage, new URL('data/training.json', document.baseURI).href)
+    : new CsvTrainingRepository(store, splitStorage, localStorage, { global: true });
   listProfiles();
   const activeName = localStorage.getItem(ACTIVE_PROFILE_KEY);
   if (activeName && store.read(activeName)) void login(activeName);

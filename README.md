@@ -361,3 +361,22 @@ A evidência adiciona uma penalidade de distância de 0,22 à classe geometricam
 A disputa é resolvida em favor de V somente quando o candidato inicial é U/V, existe referência V próxima (distância menor que 0,15 e diferença do primeiro menor que 0,04), a abertura observada corresponde a uma referência V aberta (diferença de separação normalizada menor que 0,15), e todas as referências U utilizáveis apresentam dedos fechados. Nesse caso, a margem de V contra U usa também a diferença de abertura normalizada, dividida por 0,2 e limitada a [0,1]. Semelhança global e ambiguidade com outras letras continuam limitando o escore. Essa evidência é geométrica, não probabilidade calibrada.
 
 A regra não altera as distâncias, o predicado U/R ou o cálculo de confiança quando a resposta é U. V com dedos fechados ou geometria insuficiente é recusado. U com referências suspeitas abertas não fornece evidência para resolver a disputa. O alvo solicitado não participa da escolha. CSV e exemplos existentes permanecem compatíveis. `tests/v-opening.test.js` cobre abertura, rotações/reflexão, segunda captura V contra U, recusa de dedos fechados, ambiguidade com outra letra e conservação do escore de U.
+
+### Referências visuais
+
+O treinamento exibe 27 cartões PNG (A–Z e Ç), recortados da imagem
+`Gemini_Generated_Image_1vg02g1vg02g1vg0.jpg` fornecida pelo usuário.
+Os recortes preservam letras, setas e a resolução original, sem redesenho
+ou vetorização. Veja `assets/references/README.md` para regeneração.
+
+Fotos internas em `SIGN_REFERENCES`, vídeos de movimento e dataset permanecem
+independentes das referências visuais. Os números de 0 a 9 usam cartões PNG
+recortados da prancha `Números em Libras_ sinal do sete.png` enviada pelo usuário,
+preservando a resolução original de cada recorte (492 × 246 pixels).
+
+Validação incremental: `node --test tests/reference-media.test.js`.
+## Versão para GitHub Pages
+
+Execute `npm run build:pages` para gerar a versão estática em `dist/`, com a
+base global atual em modo somente leitura. `npm start` mantém o treinamento
+local no CSV. Consulte [publicação e restauração do backup](docs/github-pages.md).

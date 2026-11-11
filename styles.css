@@ -121,6 +121,10 @@ summary { min-height: 44px; cursor: pointer; padding: 11px 0; font-size: .84rem;
 .reference-panel .eyebrow { font-size: .6rem; }
 .reference-media { display: grid; min-height: 80px; place-items: center; overflow: hidden; border-radius: 12px; background: #f1f3ee; }
 .reference-media img, .reference-media video { display: block; width: 100%; max-height: 280px; object-fit: contain; }
+.reference-media > img { height: auto; background: #fff; }
+.reference-motion { width: 100%; border-top: 1px solid var(--line); }
+.reference-motion > summary { min-height: 44px; padding: 12px; color: var(--ink); font-size: .85rem; cursor: pointer; }
+.reference-motion video { background: #172c25; }
 #reference-caption { margin: 12px 0; }
 .reference-note { border-top: 1px solid var(--line); margin: 14px 0; padding-top: 14px; font-size: .8rem; }
 .privacy-note { margin: 18px 0 0; font-size: .73rem; }
@@ -312,3 +316,8 @@ footer span:nth-child(2) { display: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+/* Public deployment keeps practice available without dataset editing. */
+.public-mode #training-screen .capture-panel,
+.public-mode #training-danger-zone,
+.public-mode #remove-motion,
+.public-mode #motion-guide { display: none !important; }

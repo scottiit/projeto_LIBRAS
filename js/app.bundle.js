@@ -400,6 +400,54 @@ const SIGN_REFERENCES = {"A":"Libras-20260913T224959Z-1-001/a/a.jpg","B":"Libras
 const SIGN_EXAMPLES = [{"label":"A","coordinates":[0,0,0,0.1432111,-0.0227911,-0.0299571,0.2319485,-0.1208308,-0.0299943,0.2471426,-0.2141647,-0.0283259,0.2433161,-0.2715878,-0.0150513,0.1751804,-0.1803867,-0.0093319,0.1554499,-0.2411683,-0.0637979,0.1368824,-0.1739883,-0.0894618,0.13908,-0.1377613,-0.1014899,0.0805278,-0.1802705,-0.0135033,0.0701158,-0.2380167,-0.0811599,0.0680107,-0.150347,-0.1007197,0.0744441,-0.1168458,-0.1042601,-0.0006635,-0.1700086,-0.0244551,-0.0074562,-0.2199254,-0.0923883,0.0030115,-0.1389222,-0.0761399,0.0114976,-0.1048609,-0.0521602,-0.0693316,-0.1550852,-0.0374574,-0.0738319,-0.1872606,-0.0820356,-0.0626468,-0.1316246,-0.069784,-0.0507962,-0.1076005,-0.052397],"aspectRatio":0.6715458764726884},{"label":"B","coordinates":[0,0,0,0.0617757,-0.0211705,-0.0544077,0.0857632,-0.0697847,-0.0822237,0.0357507,-0.1112917,-0.1053968,-0.0162966,-0.1330482,-0.1298094,0.1018102,-0.1698549,-0.0480776,0.1069775,-0.2512951,-0.0779782,0.1046034,-0.3006248,-0.1050233,0.0981619,-0.340615,-0.1244624,0.0456544,-0.1801,-0.0439012,0.0497935,-0.2693542,-0.0666171,0.0497648,-0.324258,-0.0916634,0.0509211,-0.3661707,-0.1108709,-0.0071053,-0.172824,-0.0458391,-0.0030023,-0.2529729,-0.0682306,-0.0007187,-0.3016349,-0.0896044,0.0034063,-0.3404374,-0.1038134,-0.0615587,-0.1532872,-0.0532449,-0.056774,-0.2136824,-0.0731185,-0.0540677,-0.2509359,-0.0835535,-0.0482193,-0.2836874,-0.0904946],"aspectRatio":0.75},{"label":"G","coordinates":[0,0,0,0.0758485,-0.0149804,-0.0448818,0.1473169,-0.0879307,-0.054151,0.1809116,-0.15228,-0.0593117,0.1686872,-0.2010573,-0.0610034,0.1154366,-0.1542912,-0.0349236,0.1224418,-0.2372909,-0.0769176,0.1278123,-0.2846978,-0.1016891,0.1350372,-0.3297721,-0.1186079,0.0563004,-0.1571229,-0.0310582,0.0506555,-0.1717068,-0.1005431,0.0367824,-0.1035945,-0.1163025,0.0320819,-0.0717975,-0.111761,0.0005251,-0.150838,-0.0336649,-0.008102,-0.1586221,-0.1041524,-0.0073404,-0.0950382,-0.096972,-0.0017588,-0.0677552,-0.0751044,-0.0551013,-0.1417473,-0.0399835,-0.0583947,-0.1437193,-0.0938181,-0.051085,-0.0952023,-0.0924882,-0.0403681,-0.072476,-0.0791281],"aspectRatio":0.75},{"label":"P","coordinates":[0,0,0,0.0494314,-0.0642111,-0.0149617,0.146625,-0.1211678,-0.0383446,0.246838,-0.1478238,-0.0624159,0.3285925,-0.170646,-0.0822496,0.1213303,-0.2086452,-0.0613753,0.2670283,-0.2182954,-0.1005551,0.3481368,-0.2337147,-0.1211315,0.413269,-0.2524949,-0.13486,0.1014308,-0.1891011,-0.0751635,0.2660726,-0.1508272,-0.1215066,0.3589168,-0.1204079,-0.1320747,0.4280365,-0.1026257,-0.1376294,0.0897383,-0.151218,-0.0885068,0.2256624,-0.0843417,-0.1280837,0.1892447,-0.0573777,-0.1094529,0.1470713,-0.0599321,-0.0908321,0.086207,-0.10921,-0.1045911,0.1980204,-0.0511123,-0.1297347,0.1654907,-0.0324133,-0.1153663,0.1243082,-0.0400231,-0.1000584],"aspectRatio":0.75},{"label":"Q","coordinates":[0,0,0,0.1547767,0.0496338,-0.0096221,0.2285744,0.1407745,-0.0272596,0.2420109,0.2379455,-0.0366323,0.227935,0.3026351,-0.0477876,0.1371778,0.2332924,-0.1005618,0.1296119,0.381861,-0.1409989,0.1234427,0.4610242,-0.1654783,0.1130397,0.5219955,-0.1809443,0.0172256,0.2399523,-0.0853136,0.0877104,0.3120479,-0.0820413,0.1142341,0.2700937,-0.0466327,0.1081288,0.2304323,-0.0298216,-0.0688221,0.2215849,-0.0674107,0.0104194,0.27283,-0.06728,0.0275661,0.2379641,-0.0375052,0.0214342,0.1962305,-0.0229991,-0.1336379,0.1998333,-0.0477206,-0.0677728,0.240811,-0.0464793,-0.0427655,0.2105493,-0.0267733,-0.0411854,0.1751101,-0.0127517],"aspectRatio":0.75},{"label":"R","coordinates":[0,0,0,0.087942,-0.0231676,-0.0386139,0.1475107,-0.0795934,-0.0535225,0.1012099,-0.1207655,-0.0684403,0.039693,-0.1462511,-0.0822931,0.129498,-0.1896469,-0.0248445,0.1334997,-0.2769589,-0.0609857,0.1248718,-0.3315325,-0.089888,0.1134362,-0.3808791,-0.1091243,0.0658119,-0.1902828,-0.0388622,0.109657,-0.2854522,-0.0681368,0.1339031,-0.3407115,-0.0889293,0.1492663,-0.3934256,-0.1007732,0.0015465,-0.1736695,-0.0607226,0.0207443,-0.2122499,-0.11809,0.0298852,-0.148227,-0.1291546,0.0386079,-0.1076876,-0.119753,-0.064056,-0.14683,-0.0861081,-0.0441138,-0.1752873,-0.1314031,-0.0270327,-0.1281643,-0.1281884,-0.0158975,-0.0953726,-0.1170816],"aspectRatio":0.75}];
 
 
+// Presentation assets are intentionally independent of recognition prototypes.
+// VisionController must keep using the original photos in SIGN_REFERENCES.
+const ALPHABET_ILLUSTRATIONS = Object.freeze(Object.fromEntries(
+  [...'ABCDEFGHIJKLMNOPQRSTUVWXYZÇ'].map(label => [label,
+    `assets/references/${label === 'Ç' ? 'cedilla' : label.toLowerCase()}.png`])
+));
+
+const NUMBER_ILLUSTRATIONS = Object.freeze(Object.fromEntries(
+  [...'0123456789'].map(label => [label, `assets/references/number-${label}.png`])
+));
+
+function referenceMedia(label) {
+  const illustration = ALPHABET_ILLUSTRATIONS[label] ?? NUMBER_ILLUSTRATIONS[label] ?? null;
+  const source = SIGN_REFERENCES[label];
+  return { illustration, video: source?.endsWith('.mp4') ? source : null };
+}
+
+function renderReferenceMedia(container, label) {
+  const document = container.ownerDocument;
+  const media = referenceMedia(label);
+  container.replaceChildren();
+  if (media.illustration) {
+    const image = document.createElement('img');
+    image.src = media.illustration;
+    const isNumber = /^[0-9]$/.test(String(label));
+    image.alt = `Ilustração ${isNumber ? 'do número' : 'da letra'} ${label} em LIBRAS`;
+    image.loading = 'lazy'; image.decoding = 'async';
+    image.width = isNumber ? 492 : 390; image.height = isNumber ? 246 : 290;
+    container.append(image);
+  }
+  if (media.video) {
+    const details = document.createElement('details');
+    details.className = 'reference-motion';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Ver vídeo do movimento';
+    const video = document.createElement('video');
+    video.src = media.video;
+    video.controls = true; video.muted = true;
+    video.playsInline = true; video.preload = 'none';
+    video.setAttribute('aria-label', `Vídeo de referência da letra ${label}`);
+    details.append(summary, video);
+    details.addEventListener('toggle', () => { if (!details.open) video.pause(); });
+    container.append(details);
+  }
+  return media;
+}
+
+
 function normalizeHand(hand, aspectRatio = 1) {
   if (!isValidHand(hand)) return null;
   if (!Number.isFinite(aspectRatio) || aspectRatio <= 0 || aspectRatio > 10) return null;
@@ -1783,6 +1831,29 @@ class CsvTrainingRepository {
   }
 }
 
+/** Published snapshots never call the local API or migrate browser training. */
+class StaticTrainingRepository {
+  constructor(store, splitStorage, url, fetcher = (...args) => globalThis.fetch(...args)) {
+    Object.assign(this, { store, splitStorage, url, fetcher });
+    this.readOnly = true;
+  }
+  async load(name) {
+    if (!this.snapshot) {
+      const response = await this.fetcher(this.url, { cache: 'no-cache' });
+      if (!response.ok) throw new Error('Não foi possível carregar os exemplos publicados. Recarregue a página.');
+      const snapshot = await response.json();
+      if (snapshot.version !== 1 || snapshot.kind !== 'libras-training' || snapshot.trainingScope !== GLOBAL_TRAINING_PROFILE) throw new Error('Base publicada incompatível. Gere novamente a publicação.');
+      this.snapshot = snapshot;
+    }
+    this.splitStorage.seed(name, this.snapshot);
+    return this.store.read(name);
+  }
+  async persist(name) {
+    if (this.snapshot) this.splitStorage.seed(name, this.snapshot);
+    throw new Error('Esta versão usa exemplos publicados. Altere o treinamento no servidor local.');
+  }
+}
+
 const CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240';
 
 /** Replace this adapter with a TensorFlow.js classifier returning the same contract.
@@ -2008,6 +2079,20 @@ class TrainingDangerZone {
 
 
 const $ = id => document.getElementById(id);
+const publicMode = document.querySelector('meta[name="libras-mode"]')?.content === 'static';
+if (publicMode) {
+  document.body.classList.add('public-mode');
+  $('open-training').textContent = 'Referências e prática';
+  $('training-title').textContent = 'Referências e prática';
+  $('training-title').nextElementSibling.textContent = 'Consulte os sinais e teste os exemplos publicados com a câmera.';
+  document.querySelector('.training-note p').textContent = 'Consulte as referências e pratique com os exemplos publicados. Novos treinamentos são preparados pela equipe na versão local.';
+  document.querySelector('.reference-note').textContent = 'Esta versão utiliza uma base publicada. Confira a execução com um instrutor.';
+  document.querySelector('#calibration-panel .privacy-note').textContent = 'Sua câmera é processada neste navegador. Perfis e recordes ficam neste dispositivo.';
+  const mutations = new Set(['save-example', 'reset-training-reference', 'remove-motion', 'import-motion', 'apply-training-threshold', 'delete-oldest-examples', 'delete-newest-examples', 'confirm-training-action']);
+  for (const type of ['click', 'change']) document.addEventListener(type, event => {
+    if (mutations.has(event.target.closest('[id]')?.id)) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+}
 const wideLayout = window.matchMedia('(min-width: 900px)');
 $('calibration-panel').open = wideLayout.matches;
 wideLayout.addEventListener('change', event => { $('calibration-panel').open = event.matches; });
@@ -2368,16 +2453,8 @@ function renderTarget() {
 }
 function renderReference() {
   const label = $('calibration-class').value;
-  const path = SIGN_REFERENCES[label];
-  $('reference-media').replaceChildren();
-  if (path) {
-    const element = document.createElement(path.endsWith('.mp4') ? 'video' : 'img');
-    element.src = path;
-    if (element.tagName === 'VIDEO') { element.controls = true; element.muted = true; element.playsInline = true; element.preload = 'none'; }
-    else { element.alt = `Referência de ${label} do acervo original`; element.loading = 'lazy'; }
-    $('reference-media').append(element);
-  }
-  $('reference-caption').textContent = path ? `Referência de ${label} do acervo original. Confira a execução com um instrutor de LIBRAS.` : 'Não há imagem de referência para este número no acervo. Peça a um instrutor para demonstrá-lo antes de salvar.';
+  const media = renderReferenceMedia($('reference-media'), label);
+  $('reference-caption').textContent = media.illustration ? `Ilustração de ${label}, recortada da imagem fornecida.${media.video ? ' Abra o vídeo para observar o movimento completo.' : ''} Confira a execução com um instrutor de LIBRAS.` : 'Não há imagem de referência para este número no acervo. Peça a um instrutor para demonstrá-lo antes de salvar.';
   const dynamic = DYNAMIC_CLASSES.has(label);
   const temporal = dynamic || label === 'UNKNOWN';
   const busy = Boolean(vision.calibration) || savingTraining;
@@ -2638,7 +2715,9 @@ async function update(now) {
 try {
   const splitStorage = new SplitProfileStorage(localStorage);
   store = new ProfileStore(splitStorage); training = new TrainingManager(store);
-  trainingRepository = new CsvTrainingRepository(store, splitStorage, localStorage, { global: true });
+  trainingRepository = publicMode
+    ? new StaticTrainingRepository(store, splitStorage, new URL('data/training.json', document.baseURI).href)
+    : new CsvTrainingRepository(store, splitStorage, localStorage, { global: true });
   listProfiles();
   const activeName = localStorage.getItem(ACTIVE_PROFILE_KEY);
   if (activeName && store.read(activeName)) void login(activeName);

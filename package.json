@@ -2,6 +2,14 @@
   "name": "libras-primeiros-sinais",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=18" },
-  "scripts": { "test": "node --test", "start": "node scripts/serve.js", "build": "node scripts/build.js", "dataset": "node scripts/export-dataset.js" }
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start": "node scripts/serve.js",
+    "build": "node scripts/build.js",
+    "dataset": "node scripts/export-dataset.js",
+    "build:pages": "node scripts/build-pages.js"
+  }
 }
